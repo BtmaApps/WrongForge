@@ -187,6 +187,16 @@ export class TaskManager {
     return this.queue.some((id) => this.o.store.get(id)?.session_id === sessionId);
   }
 
+  /** Sessions with a queued or running task (maintenance must not touch them). */
+  busySessions(): Set<string> {
+    const s = new Set(this.activeSessions);
+    for (const id of this.queue) {
+      const r = this.o.store.get(id);
+      if (r) s.add(r.session_id);
+    }
+    return s;
+  }
+
   get(id: string): TaskRecord | undefined {
     return this.o.store.get(id);
   }

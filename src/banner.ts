@@ -18,6 +18,12 @@ export interface BannerInfo {
   maxConcurrency?: number;
   /** Names of loaded guide files from the prompts directory. */
   promptFiles?: string[];
+  /** Workdir used when a task names none; null/undefined = every task must name one. */
+  defaultWorkdir?: string | null;
+  /** Number of configured MCP servers. */
+  mcpServers?: number;
+  /** Tasks from the previous run that were marked failed(server_restarted). */
+  recoveredTasks?: number;
 }
 
 const LOOPBACK = new Set(["127.0.0.1", "localhost", "::1"]);
@@ -76,10 +82,23 @@ export function renderBanner(i: BannerInfo, color = false): string {
   lines.push(`${bold("Data")}        ${i.dataDir}`);
   if (i.logDir) lines.push(`${bold("Logs")}        ${i.logDir}  ${dim("(daily JSONL, gzip + cleanup automatic)")}`);
   if (i.maxConcurrency) lines.push(`${bold("Concurrency")} ${i.maxConcurrency} task(s) at a time, the rest wait in a queue`);
+  if (i.defaultWorkdir !== undefined) {
+    lines.push(
+      `${bold("Workdir")}     ${i.defaultWorkdir ? i.defaultWorkdir : dim('every task must name its "workdir"')}`,
+    );
+  }
+  if (i.mcpServers !== undefined) {
+    lines.push(
+      `${bold("MCP")}         ${i.mcpServers ? `${i.mcpServers} server(s) configured` : dim("none yet")}  ${dim("(npm run mcp -- help)")}`,
+    );
+  }
   if (i.promptFiles) {
     lines.push(
       `${bold("Tool guides")} ${i.promptFiles.length ? i.promptFiles.join(", ") : dim("none yet (drop *.md files into prompts/)")}`,
     );
+  }
+  if (i.recoveredTasks) {
+    lines.push(yellow(`${bold("Recovered")}    ${i.recoveredTasks} task(s) from the previous run were marked failed (server_restarted)`));
   }
   lines.push("");
   lines.push(bold("API key") + dim("   send as   Authorization: Bearer <key>"));
@@ -91,7 +110,7 @@ export function renderBanner(i: BannerInfo, color = false): string {
   lines.push(bold("Try it"));
   lines.push(`  curl ${url}/health`);
   lines.push(`  curl ${url}/v1/tasks -H "Authorization: Bearer ${keyInExample}" -H "Content-Type: application/json" \\`);
-  lines.push(`       -d '{"prompt":"say hello","wait":true}'`);
+  lines.push(`       -d '{"prompt":"say hello","workdir":"${i.defaultWorkdir ?? "<a directory>"}","wait":true}'`);
   lines.push(dim("  Full protocol: docs/TASKS-API.md   Integration guide: docs/INTEGRATION.md"));
   lines.push("");
   if (!LOOPBACK.has(i.host)) {

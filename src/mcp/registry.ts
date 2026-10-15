@@ -16,7 +16,8 @@
  *    `{ ok:false, error }`, like with built-in tools.
  */
 
-import { PassThrough } from "node:stream";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { createMCPClient } from "@ai-sdk/mcp";
 import { Experimental_StdioMCPTransport } from "@ai-sdk/mcp/mcp-stdio";
 import { dynamicTool, jsonSchema, type ToolSet } from "ai";
@@ -266,21 +267,27 @@ export class McpRegistry {
   private async connect(name: string, spec: NormalizedSpec, key: string): Promise<Conn> {
     const started = Date.now();
     const live = this.expandSpec(name, spec); // may throw McpConfigError (missing ${VAR})
-    const stderrTail: string[] = [];
     let transport: Parameters<typeof createMCPClient>[0]["transport"];
+    // stdio servers log to stderr; node needs a real file descriptor for that,
+    // so it goes to <config dir>/mcp-logs/<server>.stderr.log (overwritten on every connect)
+    let stderrFile: string | undefined;
+    let stderrFd: number | undefined;
 
     if (live.type === "stdio") {
-      const err = new PassThrough();
-      err.on("data", (d: Buffer) => {
-        stderrTail.push(d.toString("utf8"));
-        while (stderrTail.join("").length > 4000) stderrTail.shift();
-      });
+      try {
+        const logDir = path.join(path.dirname(this.o.store.file), "mcp-logs");
+        fs.mkdirSync(logDir, { recursive: true });
+        stderrFile = path.join(logDir, `${name}.stderr.log`);
+        stderrFd = fs.openSync(stderrFile, "w");
+      } catch {
+        stderrFd = undefined; // diagnostics are optional
+      }
       transport = new Experimental_StdioMCPTransport({
         command: live.command!,
         args: live.args,
         env: live.env,
         cwd: live.cwd,
-        stderr: err,
+        stderr: stderrFd ?? "ignore",
       });
     } else {
       transport = { type: live.type, url: live.url!, headers: live.headers, redirect: "error" };
@@ -302,11 +309,27 @@ export class McpRegistry {
         }),
       ]);
     } catch (e) {
-      const tail = stderrTail.join("").trim();
+      let tail = "";
+      if (stderrFile) {
+        try {
+          tail = fs.readFileSync(stderrFile, "utf8").trim();
+        } catch {
+          /* no log */
+        }
+      }
       const msg = `${(e as Error).message}${tail ? ` — server stderr: ${truncateMiddle(tail, 800)}` : ""}`;
       this.lastError.set(name, msg);
       this.o.logger?.warn("mcp.connect_failed", { server: name, type: live.type, error: msg });
       throw new McpError("mcp_unavailable", `cannot connect to MCP server "${name}": ${msg}`);
+    } finally {
+      // the child keeps its own copy of the descriptor
+      if (stderrFd !== undefined) {
+        try {
+          fs.closeSync(stderrFd);
+        } catch {
+          /* already closed */
+        }
+      }
     }
 
     const conn: Conn = { name, key, spec, client, refs: 0 };

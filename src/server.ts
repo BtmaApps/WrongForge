@@ -1,51 +1,64 @@
 /**
- * WrongForge HTTP API — send a prompt, receive every text delta, tool
- * call and tool result as a live event stream (SSE) or as one JSON response.
+ * WrongForge HTTP API — the channel between an orchestrator (WrongStack) and
+ * the worker agent. Full reference: docs/TASKS-API.md
  *
- *   AGENT_API_KEY=secret npm run serve
+ *   POST   /v1/tasks                       submit a task (async; or wait / stream)
+ *   GET    /v1/tasks                       list tasks
+ *   GET    /v1/tasks/:id                   status + progress + result
+ *   GET    /v1/tasks/:id/events            event log (JSON, long-poll, or SSE with replay)
+ *   POST   /v1/tasks/:id/cancel            cancel
+ *   GET    /v1/events                      live SSE feed of all tasks
+ *   *      /v1/sessions…                   durable conversations (+ compact)
+ *   *      /v1/mcp/servers…                MCP server configuration
+ *   POST   /v1/maintenance/run             log/task/session housekeeping now
+ *   GET    /v1/info, /v1/tools, /health
  *
- *   POST   /v1/run             { prompt, session_id?, model?, max_steps?, stream? }
- *   GET    /v1/sessions        list sessions
- *   DELETE /v1/sessions/:id    drop a session's history
- *   GET    /v1/tools           tool names + descriptions
- *   GET    /health             no auth
- *
- * Auth: `Authorization: Bearer <AGENT_API_KEY>` (the server refuses to start
- * without a key — the agent can run shell commands on this machine).
- * Env: PORT (8787), HOST (127.0.0.1), CLAUDE_MODEL, CLAUDE_TOKEN_STORE.
+ * Auth: `Authorization: Bearer <API key>` on everything except /health.
+ * Errors: { "error": { "code": "...", "message": "..." } }
  */
 
 import * as http from "node:http";
 import * as crypto from "node:crypto";
-import type { ModelMessage } from "ai";
 import { ClaudeOAuth } from "./oauth.js";
+import { createApp, type App } from "./app.js";
+import { agentTools } from "./tools/index.js";
+import { DEFAULT_MODEL, KNOWN_MODELS } from "./agent.js";
 import { APP_NAME, VERSION, dataDir } from "./paths.js";
 import { resolveApiKey } from "./apikey.js";
 import { printBanner } from "./banner.js";
 import { loadPromptFiles } from "./prompt.js";
-import { createClaudeProvider } from "./provider.js";
-import { agentTools } from "./tools/index.js";
-import { runAgentTurn, DEFAULT_MODEL, type AgentEvent } from "./agent.js";
-
-interface Session {
-  history: ModelMessage[];
-  busy: boolean;
-  updatedAt: number;
-}
+import { SubmitError } from "./tasks/manager.js";
+import { isTerminal, type SubmitRequest, type TaskEvent, type TaskStatus } from "./tasks/types.js";
+import { runMaintenance, startMaintenance } from "./maintenance.js";
+import { McpConfigError } from "./mcp/config.js";
+import { McpError } from "./mcp/registry.js";
+import { SessionStore } from "./sessions.js";
 
 const MAX_BODY = 1_000_000;
-const MAX_SESSIONS = 100;
+const TERMINAL_EVENTS = new Set(["task.completed", "task.failed", "task.cancelled", "task.timed_out"]);
+const ALL_STATUSES: TaskStatus[] = ["queued", "running", "completed", "failed", "cancelled", "timed_out"];
+
+class HttpError extends Error {
+  constructor(
+    readonly status: number,
+    readonly code: string,
+    message: string,
+  ) {
+    super(message);
+  }
+}
 
 export interface ServerOptions {
   apiKey: string;
   oauth: ClaudeOAuth;
-  defaultModel?: string;
+  app: App;
+  /** Override the tool-guide directory shown in /v1/info (tests). */
+  promptDir?: string;
 }
 
 export function createAgentServer(opts: ServerOptions): http.Server {
-  const provider = createClaudeProvider(opts.oauth);
-  const defaultModel = opts.defaultModel ?? DEFAULT_MODEL;
-  const sessions = new Map<string, Session>();
+  const { app, oauth } = opts;
+  const manager = app.manager;
   const keyBuf = Buffer.from(opts.apiKey);
 
   const authorized = (req: http.IncomingMessage): boolean => {
@@ -55,11 +68,12 @@ export function createAgentServer(opts: ServerOptions): http.Server {
     return got.length === keyBuf.length && crypto.timingSafeEqual(got, keyBuf);
   };
 
-  const json = (res: http.ServerResponse, status: number, body: unknown): void => {
+  const json = (res: http.ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}): void => {
     const data = JSON.stringify(body);
     res.writeHead(status, {
       "Content-Type": "application/json; charset=utf-8",
       "Content-Length": Buffer.byteLength(data),
+      ...headers,
     });
     res.end(data);
   };
@@ -71,7 +85,7 @@ export function createAgentServer(opts: ServerOptions): http.Server {
       req.on("data", (c: Buffer) => {
         size += c.length;
         if (size > MAX_BODY) {
-          reject(new Error("body too large"));
+          reject(new HttpError(413, "body_too_large", `request body exceeds ${MAX_BODY} bytes`));
           req.destroy();
           return;
         }
@@ -81,154 +95,418 @@ export function createAgentServer(opts: ServerOptions): http.Server {
       req.on("error", reject);
     });
 
-  function getSession(id: string): Session {
-    let s = sessions.get(id);
-    if (!s) {
-      if (sessions.size >= MAX_SESSIONS) {
-        // evict the least recently used idle session
-        const idle = [...sessions.entries()]
-          .filter(([, v]) => !v.busy)
-          .sort((a, b) => a[1].updatedAt - b[1].updatedAt)[0];
-        if (idle) sessions.delete(idle[0]);
-      }
-      s = { history: [], busy: false, updatedAt: Date.now() };
-      sessions.set(id, s);
-    }
-    return s;
-  }
-
-  async function handleRun(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-    let body: any;
+  /** Parses a JSON object body ({} when empty). */
+  const readJson = async (req: http.IncomingMessage): Promise<Record<string, unknown>> => {
+    const text = await readBody(req);
+    if (!text.trim()) return {};
+    let v: unknown;
     try {
-      body = JSON.parse((await readBody(req)) || "{}");
+      v = JSON.parse(text);
     } catch (e) {
-      return json(res, 400, { error: `invalid JSON body: ${(e as Error).message}` });
+      throw new HttpError(400, "invalid_json", `invalid JSON body: ${(e as Error).message}`);
     }
-    const prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
-    if (!prompt) return json(res, 400, { error: "`prompt` (non-empty string) is required" });
-    const sessionId =
-      typeof body.session_id === "string" && body.session_id ? body.session_id : crypto.randomUUID();
-    const model = typeof body.model === "string" && body.model ? body.model : defaultModel;
-    const maxSteps = Number.isInteger(body.max_steps)
-      ? Math.min(Math.max(body.max_steps, 1), 100)
-      : 20;
-    const stream = body.stream !== false; // default: SSE
+    if (typeof v !== "object" || v === null || Array.isArray(v)) throw new HttpError(400, "invalid_json", "the body must be a JSON object");
+    return v as Record<string, unknown>;
+  };
 
-    if (!opts.oauth.signedIn) {
-      return json(res, 503, { error: "agent is not signed in (run `npm run import` or `npm run login`)" });
-    }
-    const session = getSession(sessionId);
-    if (session.busy) {
-      return json(res, 409, { error: "session is busy with another run", session_id: sessionId });
-    }
-    session.busy = true;
+  const intParam = (url: URL, name: string, dflt: number, min: number, max: number): number => {
+    const raw = url.searchParams.get(name);
+    if (raw === null || raw === "") return dflt;
+    const n = Number(raw);
+    if (!Number.isInteger(n) || n < min || n > max) throw new HttpError(400, "invalid_request", `\`${name}\` must be an integer ${min}-${max}`);
+    return n;
+  };
+  const flag = (url: URL, name: string): boolean => /^(1|true|yes)$/i.test(url.searchParams.get(name) ?? "");
 
-    const abort = new AbortController();
-    // client went away before we finished -> stop the run
+  // ------------------------------------------------------------------ SSE
+
+  const sseStart = (res: http.ServerResponse): void => {
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
+    });
+    res.write(": connected\n\n");
+  };
+
+  /** Streams one task's events: replay from `after`, then live, then `end`. */
+  const streamTask = (res: http.ServerResponse, taskId: string, after: number, cancelOnDisconnect = false): void => {
+    sseStart(res);
+    let last = after;
+    let replaying = true;
+    let ended = false;
+    const buffer: TaskEvent[] = [];
+
+    const cleanup = (): void => {
+      unsub();
+      clearInterval(ping);
+    };
+    const finish = (): void => {
+      if (ended) return;
+      ended = true;
+      cleanup();
+      if (!res.writableEnded) {
+        res.write(`event: end\ndata: ${JSON.stringify({ task_id: taskId, status: manager.get(taskId)?.status })}\n\n`);
+        res.end();
+      }
+    };
+    const send = (ev: TaskEvent): void => {
+      if (ended || ev.seq <= last) return;
+      last = ev.seq;
+      if (!res.writableEnded) res.write(`id: ${ev.seq}\nevent: ${ev.type}\ndata: ${JSON.stringify(ev)}\n\n`);
+      if (TERMINAL_EVENTS.has(ev.type)) finish();
+    };
+    // subscribe BEFORE replaying so nothing falls into the gap; dedupe by seq
+    const unsub = manager.subscribe((ev) => {
+      if (ev.task_id !== taskId) return;
+      if (replaying) buffer.push(ev);
+      else send(ev);
+    });
+    const ping = setInterval(() => !res.writableEnded && res.write(": ping\n\n"), 15_000);
     res.on("close", () => {
-      if (!res.writableEnded) abort.abort();
+      if (ended) return;
+      ended = true;
+      cleanup();
+      if (cancelOnDisconnect) void manager.cancel(taskId, "client disconnected");
     });
 
-    const mark = session.history.length;
-    session.history.push({ role: "user", content: prompt });
+    for (let batch = manager.events(taskId, last, 1000); batch.length && !ended; batch = manager.events(taskId, last, 1000)) {
+      for (const ev of batch) send(ev);
+    }
+    if (ended) return;
+    replaying = false;
+    for (const ev of buffer.sort((a, b) => a.seq - b.seq)) send(ev);
+    if (ended) return;
+    const t = manager.get(taskId);
+    if (!t || isTerminal(t.status)) finish();
+  };
 
-    const events: AgentEvent[] = [];
-    let seq = 0;
-    const emit = (name: string, data: unknown): void => {
-      if (stream && !res.writableEnded) {
-        res.write(`id: ${seq}\nevent: ${name}\ndata: ${JSON.stringify(data)}\n\n`);
+  /** Long-poll: resolves with new events, or [] after `waitMs`. */
+  const waitForEvents = (taskId: string, after: number, limit: number, waitMs: number, signal: AbortSignal): Promise<TaskEvent[]> =>
+    new Promise((resolve) => {
+      let done = false;
+      const settle = (): void => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        unsub();
+        resolve(manager.events(taskId, after, limit));
+      };
+      const unsub = manager.subscribe((ev) => ev.task_id === taskId && settle());
+      const timer = setTimeout(settle, waitMs);
+      signal.addEventListener("abort", settle, { once: true });
+      // an event may have been written between the caller's check and the subscription
+      if (manager.events(taskId, after, 1).length) settle();
+    });
+
+  // ------------------------------------------------------------- handlers
+
+  const taskNotFound = (id: string): HttpError => new HttpError(404, "task_not_found", `no task "${id}"`);
+
+  async function submitTask(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    const body = await readJson(req);
+    const { wait, stream, cancel_on_disconnect, ...rest } = body as Record<string, unknown> & {
+      wait?: boolean;
+      stream?: boolean;
+      cancel_on_disconnect?: boolean;
+    };
+    if (!oauth.signedIn) throw new HttpError(503, "not_signed_in", "WrongForge is not signed in (run `npm run import` or `npm run login`)");
+    const { task, deduplicated } = manager.submit(rest as unknown as SubmitRequest);
+    const location = { Location: `/v1/tasks/${task.id}` };
+
+    if (stream === true) {
+      streamTask(res, task.id, 0, cancel_on_disconnect === true);
+      return;
+    }
+    if (wait === true) {
+      res.on("close", () => {
+        if (cancel_on_disconnect === true && !res.writableEnded) void manager.cancel(task.id, "client disconnected");
+      });
+      const final = await manager.waitFor(task.id);
+      if (!res.destroyed && !res.writableEnded) json(res, 200, { task: final, deduplicated }, location);
+      return;
+    }
+    json(res, deduplicated ? 200 : 202, { task, deduplicated }, location);
+  }
+
+  async function taskEvents(req: http.IncomingMessage, res: http.ServerResponse, id: string, url: URL): Promise<void> {
+    const task = manager.get(id);
+    if (!task) throw taskNotFound(id);
+    const lastEventId = Number(req.headers["last-event-id"]);
+    const afterParam = url.searchParams.get("after");
+    const after = afterParam !== null ? intParam(url, "after", 0, 0, Number.MAX_SAFE_INTEGER) : Number.isInteger(lastEventId) && lastEventId > 0 ? lastEventId : 0;
+
+    if ((req.headers.accept ?? "").includes("text/event-stream") || flag(url, "stream")) {
+      streamTask(res, id, after);
+      return;
+    }
+    const limit = intParam(url, "limit", 1000, 1, 5000);
+    const waitMs = intParam(url, "wait_ms", 0, 0, 30_000);
+    const ac = new AbortController();
+    res.on("close", () => ac.abort());
+    let events = manager.events(id, after, limit);
+    if (!events.length && waitMs > 0 && !isTerminal(task.status)) events = await waitForEvents(id, after, limit, waitMs, ac.signal);
+    const cur = manager.get(id)!;
+    json(res, 200, {
+      task_id: id,
+      status: cur.status,
+      terminal: isTerminal(cur.status),
+      events,
+      next_after: events.length ? events[events.length - 1]!.seq : after,
+    });
+  }
+
+  function globalEvents(req: http.IncomingMessage, res: http.ServerResponse, url: URL): void {
+    const taskFilter = url.searchParams.get("task_id");
+    const sessionFilter = url.searchParams.get("session_id");
+    sseStart(res);
+    const unsub = manager.subscribe((ev) => {
+      if (taskFilter && ev.task_id !== taskFilter) return;
+      if (sessionFilter && ev.session_id !== sessionFilter) return;
+      res.write(`event: ${ev.type}\ndata: ${JSON.stringify(ev)}\n\n`);
+    });
+    const ping = setInterval(() => res.write(": ping\n\n"), 15_000);
+    res.on("close", () => {
+      unsub();
+      clearInterval(ping);
+    });
+  }
+
+  function info(): unknown {
+    const ctx = manager.contextConfig;
+    const c = manager.counts();
+    const mcp = app.mcp.status();
+    return {
+      name: APP_NAME,
+      version: VERSION,
+      protocol: 1,
+      signed_in: oauth.signedIn,
+      default_model: app.defaultModel,
+      models: Object.keys(KNOWN_MODELS),
+      queue: { ...c, max_concurrency: manager.maxConcurrency },
+      workdir: {
+        default: app.defaultWorkdir ?? null,
+        required: !app.defaultWorkdir,
+        allowed_roots: app.allowedRoots,
+        lock_by_default: app.defaultWorkdirLock,
+      },
+      context: { window: ctx.window, compact_at: ctx.compactAt, clear_at: ctx.clearAt, keep_turns: ctx.keepTurns },
+      cache: { default: process.env.WRONGFORGE_CACHE || "1h", modes: ["5m", "1h", "off"] },
+      limits: { max_body_bytes: MAX_BODY, max_steps: 500, default_max_steps: 50 },
+      webhook: { signature: "HMAC-SHA256 over '<timestamp>.<body>', header X-WrongForge-Signature: sha256=<hex>", key: process.env.WRONGFORGE_WEBHOOK_SECRET ? "WRONGFORGE_WEBHOOK_SECRET" : "the API key" },
+      tools: Object.keys(agentTools),
+      tool_guides: loadPromptFiles(opts.promptDir).map((f) => f.name),
+      mcp: { config_file: mcp.file, servers: mcp.servers.length },
+      dirs: app.dirs,
+    };
+  }
+
+  async function sessionRoutes(req: http.IncomingMessage, res: http.ServerResponse, url: URL, parts: string[]): Promise<boolean> {
+    const method = req.method ?? "GET";
+    const sessions = app.sessions;
+
+    if (parts.length === 2) {
+      if (method === "GET") return json(res, 200, { sessions: sessions.list() }), true;
+      if (method === "POST") {
+        const body = await readJson(req);
+        const id = body.id === undefined ? `ses_${crypto.randomBytes(8).toString("hex")}` : body.id;
+        if (!SessionStore.isValidId(id)) throw new HttpError(400, "invalid_request", "`id` must match [A-Za-z0-9][A-Za-z0-9._-]{0,127}");
+        if (sessions.exists(id)) throw new HttpError(409, "session_exists", `session "${id}" already exists`);
+        return json(res, 201, { session: sessions.create(id) }, { Location: `/v1/sessions/${id}` }), true;
       }
-      seq++;
+      return false;
+    }
+
+    const id = decodeURIComponent(parts[2]!);
+    if (!SessionStore.isValidId(id)) throw new HttpError(400, "invalid_request", "invalid session id");
+    const notFound = new HttpError(404, "session_not_found", `no session "${id}"`);
+
+    if (parts.length === 3) {
+      if (method === "GET") {
+        const meta = sessions.meta(id);
+        if (!meta) throw notFound;
+        return json(res, 200, { session: meta, in_use: manager.sessionInUse(id) }), true;
+      }
+      if (method === "DELETE") {
+        if (!sessions.exists(id)) throw notFound;
+        if (manager.sessionInUse(id)) throw new HttpError(409, "session_busy", "a task of this session is queued or running");
+        sessions.delete(id);
+        return json(res, 200, { deleted: id }), true;
+      }
+      return false;
+    }
+
+    if (parts.length === 4 && parts[3] === "messages" && method === "GET") {
+      const page = sessions.page(id, intParam(url, "offset", 0, 0, Number.MAX_SAFE_INTEGER), intParam(url, "limit", 100, 1, 1000));
+      if (!page) throw notFound;
+      return json(res, 200, { session_id: id, ...page }), true;
+    }
+
+    if (parts.length === 4 && parts[3] === "compact" && method === "POST") {
+      const body = await readJson(req);
+      try {
+        return json(res, 200, await manager.compactSession(id, typeof body.model === "string" ? body.model : undefined)), true;
+      } catch (e) {
+        if (e instanceof SubmitError) throw new HttpError(e.status, e.code, e.message);
+        throw new HttpError(502, "compaction_failed", (e as Error).message);
+      }
+    }
+    return false;
+  }
+
+  async function mcpRoutes(req: http.IncomingMessage, res: http.ServerResponse, url: URL, parts: string[]): Promise<boolean> {
+    const method = req.method ?? "GET";
+    const mcp = app.mcp;
+
+    if (parts.length === 3 && parts[2] === "servers" && method === "GET") return json(res, 200, mcp.status()), true;
+    if (parts.length === 3 && parts[2] === "import" && method === "POST") {
+      const body = await readJson(req);
+      const { overwrite, ...doc } = body;
+      return json(res, 200, mcp.importServers(doc, { overwrite: overwrite === true })), true;
+    }
+    if (parts[2] !== "servers" || parts.length < 4) return false;
+
+    const name = decodeURIComponent(parts[3]!);
+    const sub = parts[4];
+    const known = (): void => {
+      if (!mcp.store.get(name)) throw new HttpError(404, "mcp_server_not_found", `no MCP server named "${name}"`);
     };
 
-    if (stream) {
-      res.writeHead(200, {
-        "Content-Type": "text/event-stream; charset=utf-8",
-        "Cache-Control": "no-cache, no-transform",
-        Connection: "keep-alive",
-        "X-Accel-Buffering": "no",
-      });
+    if (parts.length === 4 && method === "PUT") {
+      const spec = await readJson(req);
+      const saved = mcp.addServer(name, spec);
+      const body: Record<string, unknown> = { name, existed: saved.existed, server: mcp.status().servers.find((s) => s.name === name) };
+      if (flag(url, "test")) body.test = await mcp.test(name);
+      return json(res, saved.existed ? 200 : 201, body), true;
     }
-    emit("start", { session_id: sessionId, model });
-
-    try {
-      const r = await runAgentTurn(provider, model, session.history, maxSteps, abort.signal, (e) => {
-        events.push(e);
-        emit(e.type, e);
-      });
-      if (r.finishReason === "aborted") {
-        session.history.length = mark;
-        emit("done", { finish_reason: "aborted", tool_calls: r.toolCalls });
-        if (!stream) return json(res, 499, { error: "aborted" });
-      } else {
-        const done = {
-          session_id: sessionId,
-          model,
-          finish_reason: r.finishReason,
-          tool_calls: r.toolCalls,
-          text: r.text,
-        };
-        emit("done", done);
-        if (!stream) return json(res, 200, { ...done, events });
+    if (parts.length === 4 && method === "DELETE") {
+      if (!mcp.removeServer(name)) throw new HttpError(404, "mcp_server_not_found", `no MCP server named "${name}"`);
+      return json(res, 200, { removed: name }), true;
+    }
+    if (parts.length === 5 && sub === "test" && method === "POST") {
+      known();
+      return json(res, 200, await mcp.test(name)), true;
+    }
+    if (parts.length === 5 && sub === "tools" && method === "GET") {
+      known();
+      const defs = await mcp.listTools(name, { refresh: flag(url, "refresh") });
+      const one = url.searchParams.get("tool");
+      if (one) {
+        const d = defs.find((x) => x.name === one);
+        if (!d) throw new HttpError(404, "mcp_tool_not_found", `server "${name}" has no tool "${one}"`);
+        return json(res, 200, { server: name, tool: d }), true;
       }
-    } catch (e) {
-      session.history.length = mark; // drop the failed turn
-      const msg = abort.signal.aborted ? "aborted" : (e as Error).message;
-      emit("error", { type: "error", error: msg });
-      if (!stream) return json(res, abort.signal.aborted ? 499 : 500, { error: msg });
-    } finally {
-      session.busy = false;
-      session.updatedAt = Date.now();
-      if (stream && !res.writableEnded) res.end();
+      return json(res, 200, { server: name, tools: defs }), true;
     }
+    if (parts.length === 5 && (sub === "enable" || sub === "disable") && method === "POST") {
+      known();
+      mcp.setEnabled(name, sub === "enable");
+      return json(res, 200, { server: mcp.status().servers.find((s) => s.name === name) }), true;
+    }
+    return false;
+  }
+
+  // -------------------------------------------------------------- dispatch
+
+  async function dispatch(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    const url = new URL(req.url ?? "/", "http://localhost");
+    const method = req.method ?? "GET";
+    const parts = url.pathname.split("/").filter(Boolean); // ["v1","tasks",id,…]
+
+    if (method === "GET" && url.pathname === "/health") {
+      const c = manager.counts();
+      return json(res, 200, { ok: true, name: APP_NAME, version: VERSION, signed_in: oauth.signedIn, ...c });
+    }
+    if (!authorized(req)) {
+      res.setHeader("WWW-Authenticate", "Bearer");
+      throw new HttpError(401, "unauthorized", "missing or wrong API key (send `Authorization: Bearer <key>`)");
+    }
+    if (parts[0] !== "v1") throw new HttpError(404, "not_found", "unknown route");
+    const area = parts[1];
+
+    if (area === "tasks") {
+      if (parts.length === 2) {
+        if (method === "POST") return submitTask(req, res);
+        if (method === "GET") {
+          const raw = url.searchParams.get("status");
+          const statuses = raw ? (raw.split(",").map((s) => s.trim()) as TaskStatus[]) : undefined;
+          if (statuses?.some((s) => !ALL_STATUSES.includes(s))) throw new HttpError(400, "invalid_request", `\`status\` must be a comma list of ${ALL_STATUSES.join(", ")}`);
+          const limit = intParam(url, "limit", 50, 1, 500);
+          const tasks = manager.list({
+            status: statuses,
+            session_id: url.searchParams.get("session_id") ?? undefined,
+            before: url.searchParams.get("before") ?? undefined,
+            limit,
+          });
+          return json(res, 200, { tasks, next_before: tasks.length === limit ? tasks[tasks.length - 1]!.created_at : null });
+        }
+      } else {
+        const id = decodeURIComponent(parts[2]!);
+        if (parts.length === 3 && method === "GET") {
+          const task = manager.get(id);
+          if (!task) throw taskNotFound(id);
+          return json(res, 200, { task });
+        }
+        if (parts.length === 4 && parts[3] === "events" && method === "GET") return taskEvents(req, res, id, url);
+        if (parts.length === 4 && parts[3] === "cancel" && method === "POST") {
+          const body = await readJson(req);
+          const r = await manager.cancel(id, typeof body.reason === "string" ? body.reason : undefined);
+          if (!r) throw taskNotFound(id);
+          return json(res, 200, r);
+        }
+      }
+    } else if (area === "events" && parts.length === 2 && method === "GET") {
+      return globalEvents(req, res, url);
+    } else if (area === "sessions") {
+      if (await sessionRoutes(req, res, url, parts)) return;
+    } else if (area === "mcp") {
+      if (await mcpRoutes(req, res, url, parts)) return;
+    } else if (area === "info" && parts.length === 2 && method === "GET") {
+      return json(res, 200, info());
+    } else if (area === "tools" && parts.length === 2 && method === "GET") {
+      return json(res, 200, { tools: Object.entries(agentTools).map(([name, t]) => ({ name, description: t.description })) });
+    } else if (area === "maintenance" && parts[2] === "run" && parts.length === 3 && method === "POST") {
+      return json(
+        res,
+        200,
+        await runMaintenance({
+          logger: app.logger, taskStore: app.taskStore, sessions: app.sessions, retention: app.retention,
+          busySessions: () => manager.busySessions(),
+        }),
+      );
+    }
+    throw new HttpError(404, "not_found", `no route for ${method} ${url.pathname}`);
   }
 
   return http.createServer((req, res) => {
-    const url = new URL(req.url ?? "/", "http://localhost");
-    const route = `${req.method} ${url.pathname}`;
-
-    void (async () => {
-      try {
-        if (route === "GET /health") return json(res, 200, { ok: true, name: APP_NAME, signedIn: opts.oauth.signedIn });
-        if (!authorized(req)) {
-          res.setHeader("WWW-Authenticate", "Bearer");
-          return json(res, 401, { error: "unauthorized" });
-        }
-        if (route === "POST /v1/run") return await handleRun(req, res);
-        if (route === "GET /v1/tools") {
-          return json(res, 200, {
-            tools: Object.entries(agentTools).map(([name, t]) => ({ name, description: t.description })),
-          });
-        }
-        if (route === "GET /v1/sessions") {
-          return json(res, 200, {
-            sessions: [...sessions.entries()].map(([id, s]) => ({
-              id,
-              messages: s.history.length,
-              busy: s.busy,
-              updated_at: new Date(s.updatedAt).toISOString(),
-            })),
-          });
-        }
-        const del = /^\/v1\/sessions\/([^/]+)$/.exec(url.pathname);
-        if (req.method === "DELETE" && del) {
-          const id = decodeURIComponent(del[1]!);
-          const s = sessions.get(id);
-          if (!s) return json(res, 404, { error: "no such session" });
-          if (s.busy) return json(res, 409, { error: "session is busy" });
-          sessions.delete(id);
-          return json(res, 200, { deleted: id });
-        }
-        return json(res, 404, { error: "not found" });
-      } catch (e) {
-        if (!res.headersSent) json(res, 500, { error: (e as Error).message });
-        else res.end();
+    const started = Date.now();
+    res.on("finish", () => {
+      const path = (req.url ?? "").split("?")[0];
+      // polling is frequent: only mutations are logged at info level
+      app.logger.log(req.method === "GET" ? "debug" : "info", "http.request", {
+        method: req.method, path, status: res.statusCode, duration_ms: Date.now() - started, ip: req.socket.remoteAddress,
+      });
+    });
+    dispatch(req, res).catch((e: unknown) => {
+      if (res.headersSent) {
+        res.end();
+        return;
       }
-    })();
+      if (e instanceof HttpError) return json(res, e.status, { error: { code: e.code, message: e.message } });
+      if (e instanceof SubmitError) return json(res, e.status, { error: { code: e.code, message: e.message } });
+      if (e instanceof McpConfigError) return json(res, 400, { error: { code: "invalid_mcp_config", message: e.message } });
+      if (e instanceof McpError) {
+        const status = e.code === "unknown_server" ? 404 : e.code === "server_disabled" ? 409 : 502;
+        return json(res, status, { error: { code: e.code, message: e.message } });
+      }
+      app.logger.error("http.unhandled", { method: req.method, path: req.url, error: e });
+      json(res, 500, { error: { code: "internal_error", message: (e as Error).message } });
+    });
   });
 }
 
-// ---- CLI entry ----
+// ------------------------------------------------------------------ CLI entry
 const isMain = process.argv[1] && /server\.(ts|js)$/.test(process.argv[1]);
 if (isMain) {
   let resolved;
@@ -241,8 +519,14 @@ if (isMain) {
   const oauth = new ClaudeOAuth(process.env.CLAUDE_TOKEN_STORE || undefined);
   const host = process.env.HOST || "127.0.0.1";
   const port = Number(process.env.PORT || 8787);
-  const model = process.env.CLAUDE_MODEL || DEFAULT_MODEL;
-  const server = createAgentServer({ apiKey: resolved.key, oauth, defaultModel: model });
+  const app = createApp({ oauth, apiKey: resolved.key });
+  const recovered = app.manager.recover(); // tasks left over from a previous run
+  const stopMaintenance = startMaintenance({
+    logger: app.logger, taskStore: app.taskStore, sessions: app.sessions, retention: app.retention,
+    busySessions: () => app.manager.busySessions(),
+  });
+  const server = createAgentServer({ apiKey: resolved.key, oauth, app });
+
   server.on("error", (e: NodeJS.ErrnoException) => {
     console.error(
       e.code === "EADDRINUSE"
@@ -252,15 +536,40 @@ if (isMain) {
     process.exit(1);
   });
   server.listen(port, host, () => {
+    app.logger.info("server.started", { host, port, version: VERSION, model: app.defaultModel, max_concurrency: app.manager.maxConcurrency, recovered: recovered.length });
     printBanner({
       version: VERSION,
       host,
       port,
       key: resolved,
       signedIn: oauth.signedIn,
-      model,
+      model: app.defaultModel || DEFAULT_MODEL,
       dataDir: dataDir(),
+      logDir: app.dirs.logs,
+      maxConcurrency: app.manager.maxConcurrency,
       promptFiles: loadPromptFiles().map((f) => f.name),
+      defaultWorkdir: app.defaultWorkdir ?? null,
+      mcpServers: app.mcp.status().servers.length,
+      recoveredTasks: recovered.length,
     });
   });
+
+  let stopping = false;
+  const shutdown = (signal: string): void => {
+    if (stopping) return;
+    stopping = true;
+    console.log(`\n${signal}: stopping — interrupting running tasks…`);
+    app.logger.info("server.stopping", { signal });
+    stopMaintenance();
+    server.close();
+    void (async () => {
+      await app.manager.shutdown();
+      await app.mcp.closeAll();
+      app.logger.info("server.stopped", {});
+      process.exit(0);
+    })();
+    setTimeout(() => process.exit(0), 20_000).unref(); // never hang on exit
+  };
+  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
 }
