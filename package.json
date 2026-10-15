@@ -14,13 +14,12 @@
     "status": "tsx src/main.ts status",
     "url": "tsx src/main.ts url",
     "models": "tsx src/main.ts models",
-    "test": "tsx test/tools.test.ts && tsx test/oauth-mock.test.ts && tsx test/agent-e2e.test.ts && tsx test/server.test.ts && tsx test/log.test.ts && tsx test/apikey.test.ts && tsx test/mcp.test.ts",
+    "test": "tsx test/tools.test.ts && tsx test/oauth-mock.test.ts && tsx test/agent-e2e.test.ts && tsx test/tasks-core.test.ts && tsx test/tasks-concurrency.test.ts && tsx test/log.test.ts && tsx test/apikey.test.ts && tsx test/mcp.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@ai-sdk/anthropic": "^4.0.80",
-    "@ai-sdk/mcp": "^2.0.76",
-    "ai": "^7.0.141",
+    "@anthropic-ai/sdk": "^0.134.0",
+    "@modelcontextprotocol/sdk": "^1.32.1",
     "zod": "^4.6.7"
   },
   "devDependencies": {

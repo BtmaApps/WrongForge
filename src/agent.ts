@@ -1,13 +1,19 @@
 /**
  * Agent loop: system prompt + tools + multi-step (agentic) execution.
- * streamText + stopWhen lets the model call tools, observe results, and
- * continue — the core Claude Code working pattern.
+ *
+ * Runs on the official Anthropic SDK (`@anthropic-ai/sdk`): each step streams
+ * one /v1/messages call, tool_use blocks are executed locally, their results
+ * are appended and the model continues — the core Claude Code working
+ * pattern. The client itself (OAuth headers, Claude Code client signature,
+ * betas, prompt-cache breakpoints) is assembled in provider.ts.
  */
 
-import { streamText, stepCountIs, type ModelMessage, type ToolSet } from "ai";
-import type { AnthropicProvider } from "@ai-sdk/anthropic";
+import Anthropic from "@anthropic-ai/sdk";
+import { z } from "zod";
 import { agentTools } from "./tools/index.js";
 import { clearOldToolOutputs } from "./compaction.js";
+import { runTool, type ToolSet } from "./tool.js";
+import { fromApiAssistantMessage, toApiMessages, type AgentMessage } from "./messages.js";
 
 /**
  * Current model lineup — platform.claude.com/docs/en/models/overview (Oct 2026).
@@ -95,15 +101,32 @@ export type AgentEvent =
   | { type: "tool_error"; id: string; name: string; error: string }
   | { type: "error"; error: string };
 
+// ------------------------------------------------------------------- tool defs
+
+function apiToolSet(tools: ToolSet): Anthropic.Messages.Tool[] {
+  return Object.entries(tools).map(([name, t]) => {
+    const schema = t.inputJsonSchema ?? z.toJSONSchema(t.inputSchema ?? z.object({}), { target: "draft-2020-12" });
+    return {
+      name,
+      description: t.description,
+      input_schema: schema as { type: "object" } & Record<string, unknown>,
+    };
+  });
+}
+
+// ----------------------------------------------------------------- agent turn
+
+const MAX_OUTPUT_TOKENS = 32_000;
+
 /**
  * Runs one agent turn. Without `onEvent` it prints to the terminal (REPL);
  * with `onEvent` every text delta / tool call / tool result is delivered as a
  * structured event instead and nothing is printed.
  */
 export async function runAgentTurn(
-  provider: AnthropicProvider,
+  client: Anthropic,
   modelId: string,
-  history: ModelMessage[],
+  history: AgentMessage[],
   maxSteps = 20,
   abortSignal?: AbortSignal,
   onEvent?: (e: AgentEvent) => void,
@@ -111,115 +134,127 @@ export async function runAgentTurn(
   guard?: ContextGuard,
   extraTools: ToolSet = {},
 ): Promise<TurnResult> {
-  const result = streamText({
-    model: provider(modelId),
-    system,
-    messages: history,
-    // built-in tools first (fixed order), then the orchestrator's (sorted by the
-    // gateway) — a stable tool list keeps the prompt cache valid
-    tools: { ...agentTools, ...extraTools },
-    stopWhen: stepCountIs(maxSteps),
-    abortSignal,
-    // Keeps one long task from outgrowing the context window: the override
-    // carries forward to later steps, so the prefix changes once and is then
-    // stable (and cacheable) again.
-    prepareStep:
-      guard && guard.clearAt > 0
-        ? ({ steps, messages }) => {
-            const used = steps[steps.length - 1]?.usage.inputTokens ?? 0;
-            if (used < guard.clearAt) return {};
-            const r = clearOldToolOutputs(messages, guard.keepToolResults);
-            if (!r.cleared) return {};
-            onEvent?.({ type: "context_cleared", cleared: r.cleared, context_tokens: used });
-            return { messages: r.messages };
-          }
-        : undefined,
-  });
+  const tools: ToolSet = { ...agentTools, ...extraTools };
+  const apiTools = apiToolSet(tools);
+  const systemBlocks = [{ type: "text" as const, text: system }];
 
   let toolCalls = 0;
   let text = "";
   let steps = 0;
   let contextTokens = 0;
+  let finishReason = "unknown";
   const usage: TokenUsage = {
     input_tokens: 0, output_tokens: 0, total_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0,
   };
-  for await (const part of result.fullStream) {
-    switch (part.type) {
-      case "start-step":
-        steps++;
-        if (onEvent) onEvent({ type: "step_start", step: steps });
-        break;
-      case "finish-step": {
-        const u: TokenUsage = {
-          input_tokens: part.usage.inputTokens ?? 0,
-          output_tokens: part.usage.outputTokens ?? 0,
-          total_tokens:
-            part.usage.totalTokens ??
-            (part.usage.inputTokens ?? 0) + (part.usage.outputTokens ?? 0),
-          cache_read_tokens: part.usage.inputTokenDetails?.cacheReadTokens ?? 0,
-          cache_write_tokens: part.usage.inputTokenDetails?.cacheWriteTokens ?? 0,
-        };
-        usage.input_tokens += u.input_tokens;
-        usage.output_tokens += u.output_tokens;
-        usage.total_tokens += u.total_tokens;
-        usage.cache_read_tokens += u.cache_read_tokens;
-        usage.cache_write_tokens += u.cache_write_tokens;
-        contextTokens = u.input_tokens + u.output_tokens;
-        if (onEvent) {
-          onEvent({ type: "step_finish", step: steps, finish_reason: String(part.finishReason), usage: u, context_tokens: contextTokens });
+
+  try {
+    while (steps < maxSteps) {
+      // In-task context guard (the prepareStep equivalent): once the live
+      // context passes clearAt, replace old tool outputs with a placeholder.
+      if (guard && guard.clearAt > 0 && contextTokens >= guard.clearAt) {
+        const r = clearOldToolOutputs(history, guard.keepToolResults);
+        if (r.cleared) {
+          onEvent?.({ type: "context_cleared", cleared: r.cleared, context_tokens: contextTokens });
         }
-        break;
       }
-      case "text-delta":
-        text += part.text;
-        if (onEvent) onEvent({ type: "text", delta: part.text });
-        else process.stdout.write(part.text);
-        break;
-      case "tool-call":
-        toolCalls++;
-        if (onEvent) {
-          onEvent({ type: "tool_call", id: part.toolCallId, name: part.toolName, input: part.input });
-        } else {
-          console.log(
-            `\n\x1b[36m▸ ${part.toolName}\x1b[0m ${summarize(part.input)}`,
-          );
+
+      steps++;
+      onEvent?.({ type: "step_start", step: steps });
+
+      const stream = client.messages.stream(
+        {
+          model: modelId,
+          max_tokens: MAX_OUTPUT_TOKENS,
+          system: systemBlocks,
+          messages: toApiMessages(history),
+          tools: apiTools,
+        },
+        { signal: abortSignal },
+      );
+
+      // Text deltas are surfaced live; tool_use inputs arrive as JSON deltas
+      // that we accumulate and emit once the block is complete.
+      let openTool: { id: string; name: string; json: string } | null = null;
+      for await (const ev of stream) {
+        if (ev.type === "content_block_delta") {
+          if (ev.delta.type === "text_delta") {
+            text += ev.delta.text;
+            if (onEvent) onEvent({ type: "text", delta: ev.delta.text });
+            else process.stdout.write(ev.delta.text);
+          } else if (ev.delta.type === "input_json_delta" && openTool) {
+            openTool.json += ev.delta.partial_json;
+          }
+        } else if (ev.type === "content_block_start" && ev.content_block.type === "tool_use") {
+          openTool = { id: ev.content_block.id, name: ev.content_block.name, json: "" };
+        } else if (ev.type === "content_block_stop" && openTool) {
+          const input = openTool.json ? JSON.parse(openTool.json) : {};
+          toolCalls++;
+          if (onEvent) onEvent({ type: "tool_call", id: openTool.id, name: openTool.name, input });
+          else console.log(`\n\x1b[36m▸ ${openTool.name}\x1b[0m ${summarize(input)}`);
+          openTool = null;
         }
-        break;
-      case "tool-result":
-        if (onEvent) {
-          onEvent({ type: "tool_result", id: part.toolCallId, name: part.toolName, output: part.output });
+      }
+
+      const final = await stream.finalMessage();
+      finishReason = final.stop_reason ?? finishReason;
+
+      const u: TokenUsage = {
+        input_tokens: final.usage.input_tokens,
+        output_tokens: final.usage.output_tokens,
+        total_tokens: final.usage.input_tokens + final.usage.output_tokens,
+        cache_read_tokens: final.usage.cache_read_input_tokens ?? 0,
+        cache_write_tokens: final.usage.cache_creation_input_tokens ?? 0,
+      };
+      usage.input_tokens += u.input_tokens;
+      usage.output_tokens += u.output_tokens;
+      usage.total_tokens += u.total_tokens;
+      usage.cache_read_tokens += u.cache_read_tokens;
+      usage.cache_write_tokens += u.cache_write_tokens;
+      contextTokens = u.input_tokens + u.output_tokens;
+      onEvent?.({
+        type: "step_finish", step: steps, finish_reason: String(finishReason), usage: u, context_tokens: contextTokens,
+      });
+
+      // Append the assistant message; tool results go into a follow-up `tool`
+      // message, exactly like the stored history has always looked.
+      history.push(fromApiAssistantMessage(final.content as never));
+      const toolUses = final.content.filter((b) => b.type === "tool_use") as Array<{
+        id: string; name: string; input: unknown;
+      }>;
+      if (final.stop_reason !== "tool_use" || toolUses.length === 0) break;
+
+      const results = [];
+      for (const call of toolUses) {
+        const r = await runTool(tools[call.name], call.input, {
+          abortSignal,
+          toolCallId: call.id,
+        });
+        if (r.ok) {
+          if (onEvent) onEvent({ type: "tool_result", id: call.id, name: call.name, output: r.output });
+          else console.log(`\n\x1b[2m  ↳ ${summarize(r.output)}\x1b[0m`);
+          results.push({ type: "tool-result" as const, toolCallId: call.id, toolName: call.name, output: r.output });
         } else {
-          console.log(`\x1b[2m  ↳ ${summarize(part.output)}\x1b[0m`);
+          if (onEvent) onEvent({ type: "tool_error", id: call.id, name: call.name, error: r.error });
+          else console.error(`\n\x1b[31m  ↳ tool error: ${r.error}\x1b[0m`);
+          results.push({ type: "tool-result" as const, toolCallId: call.id, toolName: call.name, output: { ok: false, error: r.error } });
         }
-        break;
-      case "tool-error":
-        if (onEvent) {
-          onEvent({ type: "tool_error", id: part.toolCallId, name: part.toolName, error: String(part.error) });
-        } else {
-          console.error(`\x1b[31m  ↳ tool error: ${String(part.error)}\x1b[0m`);
-        }
-        break;
-      case "error":
-        if (abortSignal?.aborted) break; // reported as an interruption below
-        if (onEvent) onEvent({ type: "error", error: String(part.error) });
-        else console.error(`\x1b[31m[error] ${String(part.error)}\x1b[0m`);
-        break;
-      default:
-        break;
+      }
+      history.push({ role: "tool", content: results });
     }
+  } catch (e) {
+    if (abortSignal?.aborted) {
+      // An interrupted turn may end mid tool-call; its partial messages would
+      // leave a dangling tool_use in the history, so the caller rolls the turn back.
+      return { finishReason: "aborted", toolCalls, text, steps, usage, context_tokens: contextTokens };
+    }
+    const msg = e instanceof Error ? e.message : String(e);
+    if (onEvent) onEvent({ type: "error", error: msg });
+    else console.error(`\x1b[31m[error] ${msg}\x1b[0m`);
+    if (finishReason === "unknown") finishReason = "error";
   }
 
-  // An interrupted turn may end mid tool-call; its partial messages would
-  // leave a dangling tool_use in the history, so the caller rolls the turn back.
-  if (abortSignal?.aborted) return { finishReason: "aborted", toolCalls, text, steps, usage, context_tokens: contextTokens };
-
-  // Append assistant + tool messages to the history (multi-step context).
-  // ai@7: response.messages was removed → result.responseMessages
-  const responseMessages = await result.responseMessages;
-  history.push(...responseMessages);
-
   return {
-    finishReason: (await result.finishReason) ?? "unknown",
+    finishReason,
     toolCalls,
     text,
     steps,

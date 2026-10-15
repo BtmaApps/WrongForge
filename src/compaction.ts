@@ -18,8 +18,8 @@
  * from guesses.
  */
 
-import { generateText, type ModelMessage } from "ai";
-import type { AnthropicProvider } from "@ai-sdk/anthropic";
+import type Anthropic from "@anthropic-ai/sdk";
+import type { AgentMessage } from "./messages.js";
 import { runInContext } from "./context.js";
 
 export const CLEARED_PLACEHOLDER = "[tool output cleared to save context]";
@@ -72,9 +72,9 @@ export function isContextOverflow(text: string): boolean {
  * array and its messages are not mutated.
  */
 export function clearOldToolOutputs(
-  messages: ModelMessage[],
+  messages: AgentMessage[],
   keepRecent: number,
-): { messages: ModelMessage[]; cleared: number } {
+): { messages: AgentMessage[]; cleared: number } {
   const slots: { m: number; p: number }[] = [];
   messages.forEach((msg, m) => {
     if (msg.role === "tool" && Array.isArray(msg.content)) {
@@ -91,7 +91,7 @@ export function clearOldToolOutputs(
   for (const { m, p } of toClear) {
     const msg = out[m] as any;
     if (isCleared(msg.content[p])) continue;
-    if (out[m] === messages[m]) out[m] = { ...msg, content: [...msg.content] } as ModelMessage;
+    if (out[m] === messages[m]) out[m] = { ...msg, content: [...msg.content] } as AgentMessage;
     (out[m] as any).content[p] = { ...msg.content[p], output: { type: "text", value: CLEARED_PLACEHOLDER } };
     cleared++;
   }
@@ -101,8 +101,8 @@ export function clearOldToolOutputs(
 // -------------------------------------------------------------- 2. compaction
 
 /** Splits a history into turns; every `user` message starts a new one. */
-export function splitTurns(messages: ModelMessage[]): ModelMessage[][] {
-  const turns: ModelMessage[][] = [];
+export function splitTurns(messages: AgentMessage[]): AgentMessage[][] {
+  const turns: AgentMessage[][] = [];
   for (const m of messages) {
     if (m.role === "user" || turns.length === 0) turns.push([m]);
     else turns[turns.length - 1]!.push(m);
@@ -122,7 +122,7 @@ function partsToText(content: unknown): string {
 }
 
 /** Plain-text rendering of messages for the summarizer (tool I/O trimmed). */
-export function renderTranscript(messages: ModelMessage[], maxChars = 600_000): string {
+export function renderTranscript(messages: AgentMessage[], maxChars = 600_000): string {
   const lines: string[] = [];
   for (const msg of messages) {
     if (msg.role === "user") {
@@ -166,7 +166,7 @@ const SUMMARY_ACK = "Understood. I have the summary of the earlier work and will
 
 export interface CompactResult {
   /** The new, shorter history. */
-  messages: ModelMessage[];
+  messages: AgentMessage[];
   /** The summary text. */
   summary: string;
   messages_before: number;
@@ -181,9 +181,9 @@ export interface CompactResult {
  * The summary call is made without prompt caching (it is a one-off prefix).
  */
 export async function compactMessages(
-  provider: AnthropicProvider,
+  client: Anthropic,
   modelId: string,
-  messages: ModelMessage[],
+  messages: AgentMessage[],
   keepTurns: number,
   abortSignal?: AbortSignal,
 ): Promise<CompactResult | null> {
@@ -193,18 +193,24 @@ export async function compactMessages(
   const recent = turns.slice(turns.length - keepTurns).flat();
 
   const res = await runInContext({ cwd: process.cwd(), env: {}, todos: [], cache: "off" }, () =>
-    generateText({
-      model: provider(modelId),
-      system: SUMMARY_SYSTEM,
-      messages: [{ role: "user", content: renderTranscript(older) }],
-      maxOutputTokens: 4000,
-      abortSignal,
-    }),
+    client.messages.create(
+      {
+        model: modelId,
+        max_tokens: 4000,
+        system: [{ type: "text", text: SUMMARY_SYSTEM }],
+        messages: [{ role: "user", content: renderTranscript(older) }],
+      },
+      { signal: abortSignal },
+    ),
   );
-  const summary = res.text.trim();
+  const summary = res.content
+    .filter((b): b is Anthropic.Messages.TextBlock => b.type === "text")
+    .map((b) => b.text)
+    .join("")
+    .trim();
   if (!summary) throw new Error("the model returned an empty summary");
 
-  const next: ModelMessage[] = [
+  const next: AgentMessage[] = [
     { role: "user", content: `${SUMMARY_PREFIX}\n\n${summary}` },
     { role: "assistant", content: SUMMARY_ACK },
     ...recent,

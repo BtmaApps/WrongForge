@@ -2,7 +2,7 @@
  * Durable conversation sessions.
  *
  *   <dir>/<session_id>/session.json     metadata (atomic write: tmp + rename)
- *   <dir>/<session_id>/messages.jsonl   one ModelMessage per line, append-only
+ *   <dir>/<session_id>/messages.jsonl   one conversation message per line, append-only
  *
  * A session is the model's conversation memory. A task that names a
  * `session_id` continues that conversation — also after a server restart.
@@ -12,7 +12,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { ModelMessage } from "ai";
+import type { AgentMessage } from "./messages.js";
 import { gzipFile } from "./log.js";
 
 const DAY_MS = 86_400_000;
@@ -53,7 +53,7 @@ export interface SessionMeta {
 
 export interface LoadedSession {
   meta: SessionMeta;
-  messages: ModelMessage[];
+  messages: AgentMessage[];
 }
 
 export class SessionStore {
@@ -112,7 +112,7 @@ export class SessionStore {
    */
   appendTurn(
     id: string,
-    newMessages: ModelMessage[],
+    newMessages: AgentMessage[],
     info: { task_id: string; model: string; prompt: string; workdir?: string; context_tokens?: number },
     now = new Date(),
   ): SessionMeta {
@@ -141,7 +141,7 @@ export class SessionStore {
    * as `messages.archive-<timestamp>.jsonl.gz` next to it — nothing is lost.
    * Crash-safe order: write the new file, archive the old, swap, update meta.
    */
-  async replaceMessages(id: string, next: ModelMessage[], now = new Date()): Promise<{ archive: string; meta: SessionMeta }> {
+  async replaceMessages(id: string, next: AgentMessage[], now = new Date()): Promise<{ archive: string; meta: SessionMeta }> {
     const meta = this.readMeta(id);
     if (!meta) throw new Error(`no such session: ${id}`);
     const dir = this.sdir(id);
@@ -191,7 +191,7 @@ export class SessionStore {
   }
 
   /** Stored messages with simple pagination (for inspection APIs). */
-  page(id: string, offset = 0, limit = 100): { total: number; messages: ModelMessage[] } | null {
+  page(id: string, offset = 0, limit = 100): { total: number; messages: AgentMessage[] } | null {
     if (!this.exists(id)) return null;
     const all = repairTail(this.readMessages(id));
     return { total: all.length, messages: all.slice(offset, offset + limit) };
@@ -234,18 +234,18 @@ export class SessionStore {
     fs.renameSync(tmp, file);
   }
 
-  private readMessages(id: string): ModelMessage[] {
+  private readMessages(id: string): AgentMessage[] {
     let raw: string;
     try {
       raw = fs.readFileSync(path.join(this.sdir(id), "messages.jsonl"), "utf8");
     } catch {
       return [];
     }
-    const out: ModelMessage[] = [];
+    const out: AgentMessage[] = [];
     for (const line of raw.split("\n")) {
       if (!line.trim()) continue;
       try {
-        out.push(JSON.parse(line) as ModelMessage);
+        out.push(JSON.parse(line) as AgentMessage);
       } catch {
         break; // torn last line after a crash: ignore it and anything after
       }
@@ -259,7 +259,7 @@ export class SessionStore {
  * assistant tool call that never got its result (the API rejects that).
  * Drop such a dangling tail.
  */
-export function repairTail(messages: ModelMessage[]): ModelMessage[] {
+export function repairTail(messages: AgentMessage[]): AgentMessage[] {
   const out = [...messages];
   while (out.length) {
     const last = out[out.length - 1]!;

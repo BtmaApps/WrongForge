@@ -13,7 +13,7 @@
  * the agent read-only (it can still list and call, but not add or remove).
  */
 
-import { tool } from "ai";
+import { tool } from "../tool.js";
 import { z } from "zod";
 import { currentContext } from "../context.js";
 import { defaultMcpRegistry, type McpRegistry } from "../mcp/registry.js";

@@ -3,3 +3,7 @@ dist/
 oauth.json
 *.log
 test-state*
+re/
+
+.dfmt/
+.claude/

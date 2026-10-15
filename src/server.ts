@@ -21,6 +21,7 @@ import * as http from "node:http";
 import * as crypto from "node:crypto";
 import { ClaudeOAuth } from "./oauth.js";
 import { createApp, type App } from "./app.js";
+import { fetchPlanUsage } from "./usage.js";
 import { agentTools } from "./tools/index.js";
 import { DEFAULT_MODEL, KNOWN_MODELS } from "./agent.js";
 import { APP_NAME, VERSION, dataDir } from "./paths.js";
@@ -424,6 +425,18 @@ export function createAgentServer(opts: ServerOptions): http.Server {
     }
     if (parts[0] !== "v1") throw new HttpError(404, "not_found", "unknown route");
     const area = parts[1];
+
+    // Plan-usage state (5h session window, weekly limit, extra usage) from the
+    // same endpoint Claude Code's /usage reads; cached 5 minutes server-side.
+    if (area === "usage" && parts.length === 2 && method === "GET") {
+      const u = await fetchPlanUsage(oauth, { force: url.searchParams.get("force") === "1" });
+      if (!u) throw new HttpError(502, "usage_unavailable", "could not read plan usage (signed in? network?)");
+      return json(res, 200, {
+        five_hour: u.fiveHour,
+        weekly: u.weekly,
+        extra_usage: u.extraUsage,
+      });
+    }
 
     if (area === "tasks") {
       if (parts.length === 2) {

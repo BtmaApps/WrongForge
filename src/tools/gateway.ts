@@ -21,7 +21,7 @@
  */
 
 import * as crypto from "node:crypto";
-import { dynamicTool, jsonSchema, type ToolSet } from "ai";
+import { dynamicTool, type ToolSet } from "../tool.js";
 import type { Logger } from "../log.js";
 import { truncateMiddle } from "./util.js";
 
@@ -345,7 +345,7 @@ export class GatewayRegistry {
     for (const d of defs) {
       tools[d.exposed] = dynamicTool({
         description: d.description,
-        inputSchema: jsonSchema(d.schema as any),
+        inputSchema: d.schema,
         execute: (input, options) => this.call(d, g, ctx, input, options?.toolCallId, options?.abortSignal),
       });
     }

@@ -254,3 +254,18 @@ npx tsx test/server.test.ts   # offline: auth, SSE tool-call stream, JSON mode, 
 It starts the real API server against a fake Anthropic SSE server, so the
 `ls` tool call really executes and its `tool_call`/`tool_result` events are
 asserted in order.
+
+### `GET /v1/usage`
+
+Plan-usage state of the signed-in subscription (same source as Claude Code's
+`/usage`). Cached server-side for 5 minutes; `?force=1` bypasses the cache.
+
+```json
+{
+  "five_hour":   { "percent": 41, "resetsAt": "2026-10-15T17:29:59Z", "isActive": true },
+  "weekly":      { "percent": 0,  "resetsAt": "2026-10-16T17:00:00Z", "isActive": false },
+  "extra_usage": { "enabled": false, "usedCredits": null, "monthlyLimit": null, "utilization": null }
+}
+```
+
+Errors: `502 usage_unavailable` when the backend cannot be read.

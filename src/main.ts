@@ -11,19 +11,21 @@
  */
 
 import * as readline from "node:readline";
-import type { ModelMessage } from "ai";
+import type { AgentMessage } from "./messages.js";
 import { ClaudeOAuth } from "./oauth.js";
 import { configHelp } from "./config.js";
-import { createClaudeProvider } from "./provider.js";
+import { createClaudeClient } from "./provider.js";
 import { agentTools } from "./tools/index.js";
 import { runAgentTurn, DEFAULT_MODEL, KNOWN_MODELS } from "./agent.js";
 import { fetchModelList } from "./models.js";
+import { fetchPlanUsage, usageLine } from "./usage.js";
 import * as crypto from "node:crypto";
 
 const HELP = `
 Commands:
   /help            show this help
   /status          session and model status
+  /usage           plan limits: 5h session window, weekly limit, extra usage
   /model <id>      switch model (e.g. claude-sonnet-5-5, claude-opus-5-5)
   /models          live model list (requires a signed-in session)
   /reset           clear the conversation history
@@ -126,9 +128,9 @@ async function main(): Promise<void> {
   }
 
   let modelId = process.env.CLAUDE_MODEL || DEFAULT_MODEL;
-  const history: ModelMessage[] = [];
+  const history: AgentMessage[] = [];
 
-  const provider = createClaudeProvider(oauth);
+  const client = createClaudeClient(oauth);
   console.log(`WrongForge — model: ${modelId}`);
   console.log(HELP);
 
@@ -141,6 +143,8 @@ async function main(): Promise<void> {
   let busy = false;
   let turnAbort: AbortController | null = null;
   rl.prompt();
+
+  const fmt = (n: number): string => n >= 1000 ? `${(n / 1000).toFixed(n >= 10_000 ? 0 : 1)}k` : String(n);
 
   rl.on("line", async (line: string) => {
     const text = line.trim();
@@ -160,6 +164,16 @@ async function main(): Promise<void> {
     }
     if (text === "/status") {
       console.log(JSON.stringify({ ...oauth.status(), model: modelId }, null, 2));
+      rl.prompt();
+      return;
+    }
+    if (text === "/usage") {
+      const u = await fetchPlanUsage(oauth);
+      if (!u) console.log("usage unavailable (signed in? network?)");
+      else {
+        console.log(usageLine(u));
+        console.log(JSON.stringify({ five_hour: u.fiveHour, weekly: u.weekly, extra_usage: u.extraUsage }, null, 2));
+      }
       rl.prompt();
       return;
     }
@@ -209,13 +223,15 @@ async function main(): Promise<void> {
     history.push({ role: "user", content: text });
     turnAbort = new AbortController();
     try {
-      const r = await runAgentTurn(provider, modelId, history, undefined, turnAbort.signal);
+      const r = await runAgentTurn(client, modelId, history, undefined, turnAbort.signal);
       if (r.finishReason === "aborted") {
         history.length = mark;
         console.log("\n\x1b[33m[interrupted — turn discarded]\x1b[0m");
       } else {
         console.log(
-          `\n\x1b[2m[${r.finishReason}${r.toolCalls ? `, ${r.toolCalls} tool call(s)` : ""}]\x1b[0m`,
+          `\n\x1b[2m[${r.finishReason}${r.toolCalls ? `, ${r.toolCalls} tool call(s)` : ""} · ` +
+            `in ${fmt(r.usage.input_tokens)} (${fmt(r.usage.cache_read_tokens)} cached, ${fmt(r.usage.cache_write_tokens)} written) · ` +
+            `out ${fmt(r.usage.output_tokens)} · context ${fmt(r.context_tokens)}]\x1b[0m`,
         );
       }
     } catch (e) {

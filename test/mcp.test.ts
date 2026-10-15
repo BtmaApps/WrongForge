@@ -1,5 +1,5 @@
 /**
- * MCP integration test — real @ai-sdk/mcp client against a real (minimal) MCP
+ * MCP integration test — real @modelcontextprotocol/sdk client against a real (minimal) MCP
  * server, over stdio AND Streamable HTTP.
  *
  *   npx tsx test/mcp.test.ts

@@ -1,4 +1,4 @@
-import { tool } from "ai";
+import { tool } from "../tool.js";
 import { z } from "zod";
 import { setTodos, type Todo } from "./todo-state.js";
 

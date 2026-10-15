@@ -21,7 +21,7 @@
  */
 
 import * as path from "node:path";
-import { createClaudeProvider } from "./provider.js";
+import { createClaudeClient } from "./provider.js";
 import type { ClaudeOAuth } from "./oauth.js";
 import { DEFAULT_MODEL } from "./agent.js";
 import { Logger, type LogLevel } from "./log.js";
@@ -118,7 +118,7 @@ export function createApp(o: AppOptions): App {
   const managerOpts: ManagerOptions = {
     store: taskStore,
     sessions,
-    provider: createClaudeProvider(o.oauth),
+    client: createClaudeClient(o.oauth),
     logger,
     webhook,
     defaultModel,

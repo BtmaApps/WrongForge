@@ -12,6 +12,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import { ClaudeOAuth } from "../src/oauth.js";
 import { createAgentServer } from "../src/server.js";
+import { createApp } from "../src/app.js";
 import { DEFAULT_MODEL } from "../src/agent.js";
 
 function sse(res: http.ServerResponse, obj: unknown): void {
@@ -100,7 +101,8 @@ async function main(): Promise<void> {
   await oauth.exchangeCode("c", "v", "https://console.anthropic.com/oauth/code/callback", "user:inference");
 
   const KEY = "test-api-key-123456789";
-  const api = createAgentServer({ apiKey: KEY, oauth });
+  const app = createApp({ oauth, apiKey: KEY });
+  const api = createAgentServer({ apiKey: KEY, oauth, app });
   await new Promise<void>((r) => api.listen(0, "127.0.0.1", r));
   const base = `http://127.0.0.1:${(api.address() as any).port}`;
   const auth = { Authorization: `Bearer ${KEY}`, "Content-Type": "application/json" };

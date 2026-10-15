@@ -1,4 +1,4 @@
-import { tool } from "ai";
+import { tool } from "../tool.js";
 import { z } from "zod";
 import { isBinary } from "./util.js";
 import {

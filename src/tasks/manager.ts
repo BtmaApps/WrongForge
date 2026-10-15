@@ -21,8 +21,8 @@
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { AnthropicProvider } from "@ai-sdk/anthropic";
-import type { ModelMessage } from "ai";
+import type Anthropic from "@anthropic-ai/sdk";
+import type { AgentMessage } from "../messages.js";
 import { runAgentTurn, type AgentEvent, type TurnResult } from "../agent.js";
 import { runInContext, type TaskContext } from "../context.js";
 import type { Logger } from "../log.js";
@@ -40,7 +40,7 @@ import {
   type GatewaySpec,
   type LoadedGateway,
 } from "../tools/gateway.js";
-import type { ToolSet } from "ai";
+import type { ToolSet } from "../tool.js";
 import { McpError, defaultMcpRegistry, type McpRegistry } from "../mcp/registry.js";
 import { isValidServerName } from "../mcp/config.js";
 import { SessionStore } from "../sessions.js";
@@ -70,7 +70,7 @@ export class SubmitError extends Error {
 export interface ManagerOptions {
   store: TaskStore;
   sessions: SessionStore;
-  provider: AnthropicProvider;
+  client: Anthropic;
   logger: Logger;
   webhook?: WebhookDispatcher | null;
   defaultModel: string;
@@ -677,13 +677,13 @@ export class TaskManager {
     const system = buildTaskSystemPrompt({ systemAppend: rec.system_append, promptDir: o.promptDir });
     const guard = { clearAt: cfg.clearAt, keepToolResults: cfg.keepToolResults };
 
-    let history: ModelMessage[] = [];
+    let history: AgentMessage[] = [];
     let mark = 0;
     let turn: TurnResult | null = null;
     let thrown: unknown;
     let retried = false;
     for (;;) {
-      const base: ModelMessage[] = session?.messages ?? [];
+      const base: AgentMessage[] = session?.messages ?? [];
       history = [...base, { role: "user", content: userMessage }];
       mark = base.length;
       turn = null;
@@ -691,14 +691,15 @@ export class TaskManager {
       live.lastError = undefined;
       try {
         turn = await runInContext(live.ctx, () =>
-          runAgentTurn(o.provider, rec.model, history, rec.max_steps, live.abort.signal, (e) => this.onAgentEvent(id, e), system, guard, extraTools),
+          runAgentTurn(o.client, rec.model, history, rec.max_steps, live.abort.signal, (e) => this.onAgentEvent(id, e), system, guard, extraTools),
         );
       } catch (e) {
         thrown = e;
       }
       if (live.abort.signal.aborted) break;
 
-      const failedText = String((thrown as Error)?.message ?? live.lastError ?? "");
+      // the stream's own error (the API's words) is more specific than the SDK's generic "no output" error
+      const failedText = `${live.lastError ?? ""} ${(thrown as Error)?.message ?? ""}`;
       const overflow = (thrown || turn?.finishReason === "error") && isContextOverflow(failedText);
       // only safe to redo when nothing has been executed yet (no side effects)
       if (overflow && !retried && rec.progress.tool_calls === 0 && session && session.messages.length > 0) {
@@ -728,7 +729,7 @@ export class TaskManager {
       return this.finalize(id, live.timedOut ? "timed_out" : "cancelled", {});
     }
     if (thrown || !turn || turn.finishReason === "error") {
-      const msg = String((thrown as Error)?.message ?? live.lastError ?? "unknown error").slice(0, 2000);
+      const msg = String(live.lastError ?? (thrown as Error)?.message ?? "unknown error").slice(0, 2000);
       if (isContextOverflow(msg)) {
         o.sessions.patchMeta(rec.session_id, { needs_compaction: true });
         return this.finalize(id, "failed", {
@@ -753,7 +754,10 @@ export class TaskManager {
       duration_ms: durationMs,
     };
 
-    const commitable = ["stop", "length", "tool-calls"].includes(turn.finishReason);
+    // finishReason comes from the Anthropic API (agent.ts): end_turn /
+    // stop_sequence = done, tool_use = the step budget ran out while the
+    // model still wanted tools, max_tokens = output limit.
+    const commitable = ["end_turn", "stop_sequence", "tool_use", "max_tokens"].includes(turn.finishReason);
     if (commitable) {
       try {
         o.sessions.appendTurn(rec.session_id, history.slice(mark), {
@@ -767,14 +771,16 @@ export class TaskManager {
       }
     }
 
-    if (turn.finishReason === "stop") return this.finalize(id, "completed", { result });
-    if (turn.finishReason === "tool-calls") {
+    if (turn.finishReason === "end_turn" || turn.finishReason === "stop_sequence") {
+      return this.finalize(id, "completed", { result });
+    }
+    if (turn.finishReason === "tool_use") {
       return this.finalize(id, "failed", {
         result,
         error: { code: "max_steps", message: `stopped after ${rec.max_steps} steps before the model finished; the work so far is in the session — send a follow-up task with the same session_id to continue` },
       });
     }
-    if (turn.finishReason === "length") {
+    if (turn.finishReason === "max_tokens") {
       return this.finalize(id, "failed", { result, error: { code: "max_tokens", message: "the model hit its output limit" } });
     }
     return this.finalize(id, "failed", {
@@ -806,7 +812,7 @@ export class TaskManager {
     this.emit(id, "session.compacting", {
       reason, context_tokens: m.context_tokens ?? null, threshold: cfg.compactAt, messages: session.messages.length, keep_turns: cfg.keepTurns,
     });
-    const res = await compactMessages(o.provider, cfg.summaryModel ?? rec.model, session.messages, cfg.keepTurns, live.abort.signal);
+    const res = await compactMessages(o.client, cfg.summaryModel ?? rec.model, session.messages, cfg.keepTurns, live.abort.signal);
     if (!res) {
       this.emit(id, "session.compacted", { compacted: false, note: `nothing to summarize (${cfg.keepTurns} or fewer turns)` });
       return session;
@@ -836,7 +842,7 @@ export class TaskManager {
     const loaded = o.sessions.load(sessionId);
     if (!loaded) throw new SubmitError(404, "no_such_session", `no such session: ${sessionId}`);
     if (this.sessionInUse(sessionId)) throw new SubmitError(409, "session_busy", "a task of this session is queued or running");
-    const res = await compactMessages(o.provider, this.ctxCfg.summaryModel ?? model ?? o.defaultModel, loaded.messages, this.ctxCfg.keepTurns);
+    const res = await compactMessages(o.client, this.ctxCfg.summaryModel ?? model ?? o.defaultModel, loaded.messages, this.ctxCfg.keepTurns);
     if (!res) {
       return { compacted: false, messages_before: loaded.messages.length, messages_after: loaded.messages.length, turns_summarized: 0, meta: loaded.meta };
     }

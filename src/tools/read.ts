@@ -1,4 +1,4 @@
-import { tool } from "ai";
+import { tool } from "../tool.js";
 import { z } from "zod";
 import * as fs from "node:fs/promises";
 import { MAX_READ_BYTES, errText, isBinary, resolvePath, splitLines } from "./util.js";

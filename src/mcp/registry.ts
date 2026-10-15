@@ -18,9 +18,11 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { createMCPClient } from "@ai-sdk/mcp";
-import { Experimental_StdioMCPTransport } from "@ai-sdk/mcp/mcp-stdio";
-import { dynamicTool, jsonSchema, type ToolSet } from "ai";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
+import { dynamicTool, type ToolSet } from "../tool.js";
 import * as crypto from "node:crypto";
 import type { Logger } from "../log.js";
 import { toolsHash, type LoadedDef } from "../tools/gateway.js";
@@ -35,8 +37,6 @@ import {
   type McpServerSpec,
   type NormalizedSpec,
 } from "./config.js";
-
-type Client = Awaited<ReturnType<typeof createMCPClient>>;
 
 export class McpError extends Error {
   constructor(
@@ -181,7 +181,7 @@ export class McpRegistry {
     const out: McpServerStatus[] = [];
     for (const [name, spec] of servers) {
       const conn = [...this.pool.values()].find((c) => c.name === name);
-      const info = conn?.client.serverInfo as { name?: string; version?: string } | undefined;
+      const info = conn?.client.getServerVersion();
       out.push({
         name,
         spec: redactSpec(spec),
@@ -267,7 +267,7 @@ export class McpRegistry {
   private async connect(name: string, spec: NormalizedSpec, key: string): Promise<Conn> {
     const started = Date.now();
     const live = this.expandSpec(name, spec); // may throw McpConfigError (missing ${VAR})
-    let transport: Parameters<typeof createMCPClient>[0]["transport"];
+    let transport: StdioClientTransport | StreamableHTTPClientTransport | SSEClientTransport;
     // stdio servers log to stderr; node needs a real file descriptor for that,
     // so it goes to <config dir>/mcp-logs/<server>.stderr.log (overwritten on every connect)
     let stderrFile: string | undefined;
@@ -282,32 +282,35 @@ export class McpRegistry {
       } catch {
         stderrFd = undefined; // diagnostics are optional
       }
-      transport = new Experimental_StdioMCPTransport({
+      transport = new StdioClientTransport({
         command: live.command!,
         args: live.args,
         env: live.env,
         cwd: live.cwd,
         stderr: stderrFd ?? "ignore",
       });
+    } else if (live.type === "http") {
+      transport = new StreamableHTTPClientTransport(new URL(live.url!), {
+        requestInit: { headers: live.headers },
+      });
     } else {
-      transport = { type: live.type, url: live.url!, headers: live.headers, redirect: "error" };
+      transport = new SSEClientTransport(new URL(live.url!), {
+        requestInit: { headers: live.headers },
+      });
     }
 
     const timeout = live.startup_timeout_ms;
     let client: Client | undefined;
     try {
-      client = await Promise.race([
-        createMCPClient({
-          transport,
-          clientName: "wrongforge",
-          protocolVersionDiscovery: !live.legacy_init,
-          initializationOptions: { timeout, signal: AbortSignal.timeout(timeout) },
-        }),
+      const c = new Client({ name: "wrongforge", version: "0.3.0" });
+      await Promise.race([
+        c.connect(transport),
         new Promise<never>((_, rej) => {
           const t = setTimeout(() => rej(new Error(`no answer within ${timeout} ms`)), timeout + 500);
           t.unref();
         }),
       ]);
+      client = c;
     } catch (e) {
       let tail = "";
       if (stderrFile) {
@@ -335,7 +338,7 @@ export class McpRegistry {
     const conn: Conn = { name, key, spec, client, refs: 0 };
     this.pool.set(key, conn);
     this.lastError.delete(name);
-    const info = client.serverInfo as { name?: string; version?: string } | undefined;
+    const info = client.getServerVersion();
     this.o.logger?.info("mcp.connected", {
       server: name, type: live.type, duration_ms: Date.now() - started, server_info: info,
     });
@@ -354,7 +357,7 @@ export class McpRegistry {
       const defs: McpToolDef[] = [];
       let cursor: string | undefined;
       for (let page = 0; page < 20; page++) {
-        const res = await conn.client.listTools(cursor ? { params: { cursor } } : undefined);
+        const res = await conn.client.listTools(cursor ? { cursor } : undefined);
         for (const t of res.tools) {
           defs.push({
             name: t.name,
@@ -382,8 +385,8 @@ export class McpRegistry {
       await this.invalidate(name); // test from a clean connection
       const tools = await this.listTools(name, { refresh: true });
       const conn = [...this.pool.values()].find((c) => c.name === name);
-      const info = conn?.client.serverInfo as { name?: string; version?: string } | undefined;
-      const instructions = conn?.client.instructions;
+      const info = conn?.client.getServerVersion();
+      const instructions = conn?.client.getInstructions();
       return {
         ok: true,
         server_info: info ? { name: info.name, version: info.version } : undefined,
@@ -420,11 +423,14 @@ export class McpRegistry {
     }
     const timeout = opts.timeoutMs ?? conn.spec.timeout_ms;
     try {
-      const res = await conn.client.callTool({
-        name: tool,
-        arguments: (input && typeof input === "object" ? input : {}) as Record<string, unknown>,
-        options: { signal: opts.signal, timeout },
-      });
+      const res = await conn.client.callTool(
+        {
+          name: tool,
+          arguments: (input && typeof input === "object" ? input : {}) as Record<string, unknown>,
+        },
+        undefined,
+        { signal: opts.signal, timeout },
+      );
       const mapped = mapCallResult(res);
       this.o.logger?.info("mcp.call", {
         task_id: opts.taskId, server: name, tool, ok: mapped.ok, duration_ms: Date.now() - started,
@@ -537,7 +543,7 @@ export class McpRegistry {
       const spec = all.get(d.server)!;
       tools[d.exposed] = dynamicTool({
         description: d.description,
-        inputSchema: jsonSchema(d.schema as never),
+        inputSchema: d.schema,
         execute: (input, options) =>
           this.callTool(d.server, d.remote, input, { signal: options?.abortSignal, timeoutMs: spec.timeout_ms, taskId: ctx.taskId }),
       });

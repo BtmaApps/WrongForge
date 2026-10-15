@@ -10,9 +10,9 @@ import * as http from "node:http";
 import * as path from "node:path";
 import * as fs from "node:fs";
 import * as os from "node:os";
-import type { ModelMessage } from "ai";
+import type { AgentMessage } from "../src/messages.js";
 import { ClaudeOAuth } from "../src/oauth.js";
-import { createClaudeProvider } from "../src/provider.js";
+import { createClaudeClient } from "../src/provider.js";
 import { runAgentTurn, DEFAULT_MODEL } from "../src/agent.js";
 
 /** Writes one SSE event. */
@@ -148,8 +148,8 @@ function main(): Promise<void> {
           "user:inference user:profile",
         );
 
-        const provider = createClaudeProvider(oauth);
-        const history: ModelMessage[] = [
+        const provider = createClaudeClient(oauth);
+        const history: AgentMessage[] = [
           { role: "user", content: "What is in this directory?" },
         ];
         const result = await runAgentTurn(provider, DEFAULT_MODEL, history);
@@ -186,7 +186,9 @@ function main(): Promise<void> {
           assert(
             Array.isArray(sys) &&
               typeof sys[0]?.text === "string" &&
-              sys[0].text.startsWith("You are Claude Code"),
+              sys[0].text.startsWith("x-anthropic-billing-header:") &&
+              /cc_version=2\.1\.300\.bc2; cc_entrypoint=sdk-cli;$/.test(sys[0].text) &&
+              sys[1]?.text?.startsWith("You are a Claude agent"),
             `request ${i + 1}: Claude Code system marker is the first system block`,
           );
           const toolNames = (r.body.tools ?? []).map((t: any) => t.name);
