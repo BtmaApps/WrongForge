@@ -41,6 +41,14 @@ Add a `gateway` object to `POST /v1/tasks`. Two ways to provide the tool list:
 }
 ```
 
+> Schemas may use `oneOf`/`anyOf`/`allOf` freely — including at the top
+> level. The Messages API refuses those at the top level, so WrongForge
+> flattens them before sending (`toApiInputSchema` in `src/tools/util.ts`):
+> `allOf` merges strictly, `oneOf`/`anyOf` merge into a permissive union of
+> properties, and a field stays required only when every branch requires it.
+> The orchestrator still receives the model's input untouched and validates
+> it however it likes.
+
 ### `gateway` fields
 
 | Field | Type | Default | Meaning |
