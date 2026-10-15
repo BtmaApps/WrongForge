@@ -247,6 +247,8 @@ export interface HarnessOptions {
   script?: Script;
   /** Share an existing fake (restart tests). */
   fake?: Fake;
+  /** Serve this directory as the dashboard (tests the static + SPA routes). */
+  webuiDir?: string;
 }
 
 export async function startHarness(opts: HarnessOptions = {}): Promise<Harness> {
@@ -283,7 +285,7 @@ export async function startHarness(opts: HarnessOptions = {}): Promise<Harness> 
   });
   app.manager.recover();
 
-  const server = createAgentServer({ apiKey: key, oauth, app, promptDir });
+  const server = createAgentServer({ apiKey: key, oauth, app, promptDir, ...(opts.webuiDir ? { webuiDir: opts.webuiDir } : {}) });
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
 

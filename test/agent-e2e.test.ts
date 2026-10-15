@@ -161,6 +161,7 @@ function main(): Promise<void> {
 
         assert(messagesRequests.length === 2, "two LLM steps (tool + final)");
         assert(tokenCalls === 1, "token fetched once");
+        assert(messagesRequests[0].body.effort === "high", "default effort (high) is sent on the agent path");
 
         for (const [i, r] of messagesRequests.entries()) {
           assert(

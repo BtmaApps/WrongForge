@@ -21,6 +21,20 @@ import {
   CLEARED_PLACEHOLDER,
 } from "../src/compaction.js";
 import { applyCacheBreakpoints } from "../src/cache.js";
+import {
+  applyEffortToBody,
+  clampEffort,
+  defaultEffort,
+  effectiveEffort,
+  effortRejectedOnce,
+  effortSupport,
+  isEffortSetting,
+  markEffortRejected,
+  resetEffortRejections,
+  resolveEffort,
+  sessionEffort,
+  setSessionEffort,
+} from "../src/effort.js";
 import { fromApiAssistantMessage, toApiMessages, type AgentMessage } from "../src/messages.js";
 import { dynamicTool, runTool, tool } from "../src/tool.js";
 import { configHelp, configFilePath, loadOAuthConfig } from "../src/config.js";
@@ -321,7 +335,59 @@ async function main(): Promise<void> {
   stop();
   assert(true, "startMaintenance returns stopper");
 
-  console.log("UNIT CORE TESTS PASSED ✓ (compaction, cache, messages, tool, config, paths, banner, prompt, usage, maintenance)");
+  // ================================================================ effort
+  {
+    assert(defaultEffort({}) === "high", "default effort is high");
+    assert(defaultEffort({ WRONGFORGE_EFFORT: "low" }) === "low", "env effort override");
+    assert(defaultEffort({ WRONGFORGE_EFFORT: " HIGH " }) === "high", "env effort is trimmed/case-folded");
+    assert(defaultEffort({ WRONGFORGE_EFFORT: "turbo" }) === "high", "invalid env effort falls back to high");
+    assert(isEffortSetting("off") && isEffortSetting("medium") && !isEffortSetting("turbo") && !isEffortSetting(3), "effort setting validation");
+
+    assert(effortSupport("claude-sonnet-5-5").length === 3, "5.x family supports every level");
+    assert(effortSupport("claude-fable-5-1").includes("high"), "fable 5.x supports high");
+    assert(effortSupport("claude-haiku-4-5-20251001").length === 3, "4.5 family supports every level");
+    assert(effortSupport("claude-sonnet-4-20250514").length === 0, "sonnet 4.0 has no effort");
+    assert(effortSupport("claude-opus-4-1-20250805").length === 0, "opus 4.1 has no effort");
+    assert(effortSupport("claude-3-5-sonnet-20241022").length === 0, "3.x has no effort");
+    assert(effortSupport("claude-future-9").length === 3, "unknown models are assumed effort-capable");
+
+    assert(resolveEffort("high", "claude-sonnet-5-5").effort === "high", "supported level passes through");
+    assert(resolveEffort("off", "claude-sonnet-5-5").effort === null, "off omits the field");
+    const none = resolveEffort("high", "claude-opus-4-1");
+    assert(none.effort === null && none.unsupported, "effort-incapable model omits the field");
+    assert(clampEffort("high", ["low", "medium"]) === "medium", "clamp picks the nearest level below");
+    assert(clampEffort("low", ["medium", "high"]) === "medium", "clamp picks the nearest level above");
+    assert(clampEffort("medium", ["low", "high"]) === "low", "clamp tie prefers the cheaper level");
+
+    setSessionEffort("low");
+    assert(sessionEffort() === "low", "session effort set");
+    setSessionEffort(null);
+    assert(sessionEffort() === null, "session effort cleared");
+
+    // runtime learning: a model the API refused effort for opts out, others keep it
+    resetEffortRejections();
+    markEffortRejected("claude-sonnet-5-5");
+    assert(effortRejectedOnce("claude-sonnet-5-5") && !effortRejectedOnce("claude-opus-5-5"), "a learned rejection is per model");
+    assert(effectiveEffort("claude-sonnet-5-5") === "off", "the rejected model omits effort");
+    assert(effectiveEffort("claude-opus-5-5") === "high", "other models keep the default effort");
+    markEffortRejected();
+    assert(effortRejectedOnce("claude-opus-5-5"), "a rejection without a model id disables effort everywhere");
+    resetEffortRejections();
+    assert(!effortRejectedOnce("claude-sonnet-5-5") && effectiveEffort("claude-sonnet-5-5") === "high", "reset forgets the learned rejections");
+
+    // the provider injects effort into the /v1/messages body, model-aware
+    const mkBody = (model: string): Record<string, unknown> => ({ model, max_tokens: 32, messages: [] });
+    const withEffort = mkBody("claude-sonnet-5-5");
+    assert(applyEffortToBody(withEffort, "high") === "high" && withEffort.effort === "high", "body carries the effort field");
+    const offBody = mkBody("claude-sonnet-5-5");
+    assert(applyEffortToBody(offBody, "off") === null && !("effort" in offBody), "off leaves the body untouched");
+    const oldBody = mkBody("claude-3-5-sonnet-20241022");
+    assert(applyEffortToBody(oldBody, "high") === null && !("effort" in oldBody), "old models get no effort field");
+    const midBody = mkBody("claude-haiku-5-5");
+    assert(applyEffortToBody(midBody, "medium") === "medium" && midBody.effort === "medium", "effort level forwarded verbatim");
+  }
+
+  console.log("UNIT CORE TESTS PASSED ✓ (compaction, cache, effort, messages, tool, config, paths, banner, prompt, usage, maintenance)");
 }
 
 main().catch((e) => {

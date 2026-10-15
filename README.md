@@ -71,9 +71,23 @@ npm run models            # live model list for your account
 npm start                 # chat REPL
 npm run serve             # HTTP task API (port 8787)
 npm run mcp -- list       # manage MCP servers from the terminal
+npm run webui:build       # build the live dashboard once (served at / by `serve`)
+npm run webui             # dashboard development (Vite on :5173, proxying the API)
 ```
 
 Other `main.ts` subcommands: `url` (print an authorize URL), `logout`.
+
+**Live dashboard** (`npm run webui:build` once, then open `http://127.0.0.1:8787/`
+while the server runs): a React + Radix UI single page that streams the global
+`/v1/events` feed over SSE and shows everything as it happens — a filterable
+live event firehose (per step: what went out to the model — model, effort,
+message/tool counts — and what came back — text, tool calls with inputs and
+outputs, usage), a task table with a per-step detail view, sessions with
+context usage and stored messages, plan usage, and a React Flow graph of the
+whole system (WrongStack → tasks → models ↔ tools, workdirs) where active
+edges animate. The browser asks for the server API key once (`?key=` on the
+URL also works — browsers cannot set headers on EventSource); only the shell
+is public, all data stays behind the key.
 
 `npm run import` reads `claudeAiOauth` from `~/.claude/.credentials.json`
 (Claude Code CLI's stored session) into this app's encrypted token store. The
@@ -85,11 +99,13 @@ keeps working. If Claude Code re-logins, run `npm run import` again.
 > `https://console.anthropic.com/oauth/code/callback`, so the paste-the-code
 > flow (the standard Claude Code CLI flow) is the only login path.
 
-**REPL commands:** `/help /status /usage /model <id> /models /reset /tools /exit`.
+**REPL commands:** `/help /status /usage /model <id> /effort [lvl] /models /reset /tools /exit`.
 `/usage` shows the plan limits (5-hour window, weekly, extra usage). Ctrl+C
 interrupts a running turn (the turn is discarded from the history); when idle it
 quits. The REPL runs up to 20 model steps per turn. Default model is
-`claude-sonnet-5-5`; override with `CLAUDE_MODEL` or `/model`.
+`claude-sonnet-5-5`; override with `CLAUDE_MODEL` or `/model`. Reasoning
+effort defaults to `WRONGFORGE_EFFORT` (high); `/effort low|medium|high|off`
+changes it for the session (clamped to what the model supports).
 
 ## Privacy — what is sent to the other side
 
@@ -242,7 +258,7 @@ client goes away.
 | `GET /v1/usage` | plan usage (5-hour, weekly, extra), cached 5 min |
 | `GET /v1/info`, `GET /v1/tools` | server capabilities and limits / tool list |
 | `POST /v1/maintenance/run` | run housekeeping now |
-| `GET /health` | the only unauthenticated route |
+| `GET /health` | unauthenticated (as is the optional dashboard shell, see below) |
 
 **Task lifecycle:** `queued → running → completed | failed | cancelled | timed_out`.
 Failures carry a machine-readable `error.code`: `agent_error`, `max_steps`,
@@ -254,16 +270,28 @@ recovered at startup.
 `max_steps` (1–500, default 50), `timeout_ms` (default 30 min), `workdir`
 (required unless `WRONGFORGE_WORKDIR` is set; checked against
 `WRONGFORGE_ALLOWED_ROOTS`), `workdir_lock`, `cache`, `env`, `system_append`,
-`context` (opaque, echoed back), `callback`, `gateway`, `mcp`, `builtin_tools`
+`effort` (`low|medium|high|off`), `context` (opaque, echoed back), `callback`,
+`gateway`, `mcp`, `builtin_tools`
 (allowlist of the built-in tools for this task, e.g. read-only ones so writes and
 shell go through the orchestrator's gateway; omit = all; `/v1/info` lists
-`features: ["builtin_tools"]`). The authoritative
+`features: ["builtin_tools", "effort"]`). The authoritative
 list is `SubmitRequest` in `src/tasks/types.ts`.
 
 **Events** (`seq` is per task, strictly increasing and gap-free; stored in
 `events.jsonl`): `task.queued/started/heartbeat/completed/failed/cancelled/timed_out`,
-`step.started/finished`, `tools.loaded`, `session.compacting/compacted`,
+`step.started/request/finished`, `tools.loaded`, `session.compacting/compacted`,
 `context.cleared`, `agent.text/report/todos`, `tool.started/finished/failed`.
+`step.request` carries what is about to be sent to the model for that step
+(`model`, `effort`, `max_tokens`, `messages`, `tools`) — the request half of a
+live traffic view; these events can be large.
+
+**Dashboard (optional):** if a built web UI exists in `webui/dist` (it is not in
+this repository snapshot), the server serves it at `/` (SPA fallback, traversal
+refused) and prints a `dashboard:` line at startup; without it `/` shows a "not
+built" hint. Only the static shell is public — data still needs the API key.
+Since browsers cannot set headers on `EventSource`, `/v1/*` also accepts the key
+as `?key=<key>` (request logs omit the query string); prefer the
+`Authorization` header everywhere else.
 
 **Webhooks:** with `callback: { url, events? }` events are POSTed with retries and
 exponential backoff (`WRONGFORGE_WEBHOOK_MAX_ATTEMPTS`, default 6). Headers:
@@ -306,6 +334,18 @@ rejects `cache_control`, caching switches itself off for the process.
 `/v1/messages` retries once on `401` (after a token refresh); the SDK retries
 transient errors twice.
 
+**Reasoning effort:** effort-capable models get an `effort` field — `low`,
+`medium` or `high` (default `high`, `WRONGFORGE_EFFORT`; `off` never sends
+it). Which levels a model accepts depends on its family (`src/effort.ts`
+keeps the table); a level the model lacks is clamped to the nearest one it
+has, and models without effort support never receive the field. If the API
+rejects the parameter for a model (verified live: the subscription backend
+answers `effort: Extra inputs are not permitted` even for models this table
+expects to accept it), the request is retried once without it and the field
+is dropped for THAT model for the rest of the process — other models keep
+their effort. Per task via the `effort` submit field, in the REPL via
+`/effort`; `WRONGFORGE_EFFORT=off` skips the probe entirely.
+
 **System prompt in task mode** = base prompt + a "worker for the orchestrator"
 block + every `prompts/*.md` guide (dir: `WRONGFORGE_PROMPT_DIR`; files starting
 with `_` and `README.md` are skipped; re-read for every task) + the task's
@@ -325,10 +365,14 @@ src/mcp/           MCP config store (mcp.json) + pooled client registry
 src/tasks/         TaskManager (queue, lifecycle, recovery), TaskStore (disk),
                    webhook dispatcher, protocol types
 src/sessions.ts    persistent sessions     src/compaction.ts   context guard + summaries
-src/cache.ts       prompt-cache breakpoints  src/prompt.ts     task system prompt
+src/cache.ts       prompt-cache breakpoints  src/prompt.ts      task system prompt
+src/effort.ts      model-aware reasoning effort (effort field per model family)
 src/log.ts         JSONL logs (masking, rollover, gzip)   src/maintenance.ts  retention
 src/app.ts         wires everything from env   src/apikey.ts  API key resolution
-src/main.ts        CLI + REPL        src/server.ts     HTTP API      src/mcp-cli.ts  MCP CLI
+src/main.ts        CLI + REPL        src/server.ts     HTTP API (+ optional dashboard)
+src/mcp-cli.ts     MCP CLI
+webui/             the dashboard itself: React 19 + Radix UI + React Flow (Vite);
+                   `webui:build` compiles it to webui/dist, which server.ts serves at /
 ```
 
 `runAgentTurn(client, model, history, maxSteps, abortSignal, onEvent?, system?, guard?, extraTools?)`:
@@ -362,6 +406,7 @@ Environment variables (all optional unless noted):
 | `WRONGFORGE_TASK_TIMEOUT_MS` / `_HEARTBEAT_MS` | Default task timeout (30 min) / heartbeat interval (15 s) |
 | `WRONGFORGE_WEBHOOK_SECRET` / `_WEBHOOK_MAX_ATTEMPTS` | Webhook HMAC key (default: API key) / attempts (6) |
 | `WRONGFORGE_CACHE` | Default cache mode `5m\|1h\|off` (1h) |
+| `WRONGFORGE_EFFORT` | Default reasoning effort `low\|medium\|high\|off` (high), clamped to model support |
 | `WRONGFORGE_CONTEXT_WINDOW`, `_COMPACT_AT`, `_CLEAR_AT`, `_COMPACT_KEEP_TURNS`, `_KEEP_TOOL_RESULTS`, `_SUMMARY_MODEL` | Context management (see above) |
 | `WRONGFORGE_PROMPT_DIR` | Guide directory (default `<repo>/prompts`) |
 | `WRONGFORGE_MCP_CONFIG`, `_MCP_IDLE_MS`, `_MCP_TOOLS_TTL_MS`, `_MCP_AGENT_MANAGE` | MCP config path, pool idle time, tool-list TTL, allow the agent to add/remove servers (1) |
@@ -400,8 +445,10 @@ helpers, todos), `oauth-mock` (exchange, refresh, header injection, import),
 `agent-e2e` (whole loop against a fake Anthropic SSE server with real local tool
 execution), `tasks-core` (lifecycle, events, idempotency, replay, sessions,
 cache-prefix stability, recovery), `tasks-concurrency` (parallel isolation,
-queue, locks, cancel, timeout, allowed roots, webhooks), `log`, `apikey`, `mcp`.
-No test talks to Anthropic.
+queue, locks, cancel, timeout, allowed roots, webhooks), `log`, `apikey`, `mcp`,
+plus `unit-core` (compaction, cache, messages, config, paths, banner, prompts,
+usage, maintenance), `unit-net` (network-facing helpers), `unit-final` and `cli`
+(REPL / entry points). No test talks to Anthropic.
 
 > `test/server.test.ts` targets the removed `/v1/run` endpoint, is not part of
 > `npm test`, and currently fails — it needs porting to `/v1/tasks`.
@@ -415,7 +462,8 @@ No test talks to Anthropic.
   a guarantee, and there is no per-command approval or sandbox.
 - The HTTP API gives its key holder that same power. Keep it on loopback, keep
   the key secret (compared in constant time), and put TLS + a reverse proxy in
-  front before exposing it. `/health` is the only unauthenticated route.
+  front before exposing it. `/health` and the static dashboard shell are the only
+  unauthenticated routes; every `/v1/*` route needs the key.
 - `web_fetch` refuses non-public addresses and embedded credentials, but it
   resolves DNS separately from the request, so it is not hardened against DNS
   rebinding.

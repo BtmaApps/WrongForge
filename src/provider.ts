@@ -24,6 +24,13 @@ import * as path from "node:path";
 import type { ClaudeOAuth } from "./oauth.js";
 import { PROTOCOL } from "./oauth.js";
 import { applyCacheBreakpoints, defaultCacheMode, type CacheMode } from "./cache.js";
+import {
+  applyEffortToBody,
+  effectiveEffort,
+  effortRejectedOnce,
+  markEffortRejected,
+} from "./effort.js";
+
 import { currentContext } from "./context.js";
 import { dataDir } from "./paths.js";
 
@@ -225,6 +232,10 @@ function withClaudeCodeSystem(
     // inputs are not permitted", verified live) — betas travel via the header
     // only on this endpoint.
     applyCacheBreakpoints(body, effectiveCacheMode());
+    // Reasoning effort, model-aware: only sent when the model's family accepts
+    // it (see effort.ts). Same position in every request, so the cached prefix
+    // (tools -> system -> messages) is unaffected.
+    applyEffortToBody(body, effectiveEffort(String(body.model ?? "")));
     return { input, init: { ...init, body: JSON.stringify(body) } };
   } catch {
     return { input, init };
@@ -292,6 +303,28 @@ export function oauthFetch(oauth: ClaudeOAuth): typeof globalThis.fetch {
       if (/cache_control|cache control|ttl/i.test(detail)) {
         cacheRejected = true;
         console.error("[cache] the API rejected cache_control — prompt caching is disabled for this process:", detail.slice(0, 300));
+        res = await doFetch();
+      }
+    }
+    // The API refused the effort parameter (a model that does not accept it —
+    // e.g. one newer than effort.ts's table): retry once without it and stop
+    // sending it for THAT model, so other models keep their effort. The
+    // retried request succeeded whenever you can read this — informational.
+    if (res.status === 400 && !effortRejectedOnce()) {
+      const detail = await res.clone().text().catch(() => "");
+      if (/effort/i.test(detail)) {
+        let model = "";
+        try {
+          const body = typeof init?.body === "string" ? (JSON.parse(init.body) as { model?: unknown }) : null;
+          if (typeof body?.model === "string" && body.model) model = body.model;
+        } catch {
+          /* keep "" — the global fallback below */
+        }
+        markEffortRejected(model || undefined);
+        console.error(
+          `[effort] ${model || "this backend"} does not accept the effort parameter — retried without it; effort is now off for ${model || "all models"} in this process:`,
+          detail.slice(0, 300),
+        );
         res = await doFetch();
       }
     }

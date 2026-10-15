@@ -28,6 +28,7 @@ import { runInContext, type TaskContext } from "../context.js";
 import type { Logger } from "../log.js";
 import { buildTaskPreamble, buildTaskSystemPrompt } from "../prompt.js";
 import { defaultCacheMode, isCacheMode, type CacheMode } from "../cache.js";
+import { defaultEffort, isEffortSetting, type EffortSetting } from "../effort.js";
 import { compactMessages, contextConfigFromEnv, isContextOverflow, type ContextConfig } from "../compaction.js";
 import type { LoadedSession } from "../sessions.js";
 import { agentTools } from "../tools/index.js";
@@ -275,6 +276,11 @@ export class TaskManager {
     if (req.cache !== undefined && !isCacheMode(req.cache)) bad("invalid_request", '`cache` must be "5m", "1h" or "off"');
     const cache: CacheMode = req.cache ?? defaultCacheMode();
 
+    if (req.effort !== undefined && !isEffortSetting(req.effort)) {
+      bad("invalid_request", '`effort` must be "low", "medium", "high" or "off"');
+    }
+    const effort: EffortSetting = req.effort ?? defaultEffort();
+
     const env: Record<string, string> = {};
     if (req.env !== undefined) {
       if (typeof req.env !== "object" || req.env === null || Array.isArray(req.env)) bad("invalid_request", "`env` must be an object of strings");
@@ -365,6 +371,7 @@ export class TaskManager {
       max_steps: maxSteps,
       timeout_ms: timeoutMs,
       cache,
+      effort,
       workdir,
       workdir_lock: workdirLock,
       env_keys: Object.keys(env),
@@ -379,7 +386,7 @@ export class TaskManager {
     };
     o.store.put(rec);
     o.logger.info("task.submitted", {
-      task_id: id, session_id: sessionId, session_created: sessionCreated, model, workdir, workdir_lock: workdirLock, cache,
+      task_id: id, session_id: sessionId, session_created: sessionCreated, model, workdir, workdir_lock: workdirLock, cache, effort,
       max_steps: maxSteps, timeout_ms: timeoutMs, env_keys: rec.env_keys, has_callback: Boolean(rec.callback),
       prompt: rec.prompt, context: rec.context,
     });
@@ -570,6 +577,7 @@ export class TaskManager {
       env: live.env,
       todos: [],
       cache: rec.cache,
+      effort: rec.effort,
       mcp: this.mcp,
       report: (r) => {
         rec.progress.last_report = { ...r, at: new Date().toISOString() };
@@ -607,7 +615,7 @@ export class TaskManager {
         : {}),
       resumed_messages: session?.messages.length ?? 0,
       context_tokens: session?.meta.context_tokens ?? null,
-      cache: rec.cache, max_steps: rec.max_steps, timeout_ms: rec.timeout_ms,
+      cache: rec.cache, effort: rec.effort, max_steps: rec.max_steps, timeout_ms: rec.timeout_ms,
     });
 
     // ---- 1. keep the session inside the context window (summarize old turns)
@@ -872,6 +880,11 @@ export class TaskManager {
         this.flushText(id);
         rec.progress.steps = e.step;
         this.emit(id, "step.started", { step: e.step });
+        break;
+      case "step_request":
+        this.emit(id, "step.request", {
+          step: e.step, model: e.model, effort: e.effort, max_tokens: e.max_tokens, messages: e.messages, tools: e.tools,
+        });
         break;
       case "step_finish":
         this.flushText(id);

@@ -458,6 +458,46 @@ data: ${JSON.stringify(o)}
   assert(cRun.text === "nocache" && cacheStep === 2, "cache_control rejected -> retried clean");
   cacheServer.close();
 
+  // effort rejection -> retried once without the field, and only for that model
+  const effortBodies: any[] = [];
+  const effortServer = http.createServer((req, res) => {
+    if (req.url === "/v1/oauth/token") {
+      res.writeHead(200).end(JSON.stringify({ access_token: "a", refresh_token: "r", expires_in: 3600, scope: "s" }));
+      return;
+    }
+    const chunks: Buffer[] = [];
+    req.on("data", (c: Buffer) => chunks.push(c));
+    req.on("end", () => {
+      const body = JSON.parse(Buffer.concat(chunks).toString());
+      effortBodies.push(body);
+      if (body.model === "m-noeffort" && "effort" in body) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "effort: Extra inputs are not permitted" } }));
+        return;
+      }
+      res.writeHead(200, { "Content-Type": "text/event-stream" });
+      const w = (o: unknown) => res.write(`event: ${String((o as { type: string }).type)}\ndata: ${JSON.stringify(o)}\n\n`);
+      w({ type: "message_start", message: { id: "m", type: "message", role: "assistant", model: "x", content: [], stop_reason: null, usage: { input_tokens: 3, output_tokens: 1 } } });
+      w({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } });
+      w({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "effok" } });
+      w({ type: "content_block_stop", index: 0 });
+      w({ type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 1 } });
+      w({ type: "message_stop" });
+      res.end();
+    });
+  });
+  const effortPort = await listen(effortServer);
+  process.env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${effortPort}`;
+  process.env.ANTHROPIC_TOKEN_URL = `http://127.0.0.1:${effortPort}/v1/oauth/token`;
+  const eOauth = new ClaudeOAuth(path.join(tmp, "effort-tokens.json"));
+  eOauth.importFromClaudeCode(ccFile);
+  const e1 = await runAgentTurn(createClaudeClient(eOauth), "m-noeffort", [{ role: "user", content: "x" }], 2);
+  assert(e1.text === "effok" && effortBodies.length === 2, "effort rejected -> retried once without it");
+  assert(effortBodies[0].effort === "high" && !("effort" in effortBodies[1]), "first body carries effort, the retry drops it");
+  const e2 = await runAgentTurn(createClaudeClient(eOauth), "m-capable", [{ role: "user", content: "x" }], 2);
+  assert(e2.text === "effok" && effortBodies[2].effort === "high", "a different model keeps its effort after the rejection");
+  effortServer.close();
+
   // cleanup servers
   for (const s of [modelsServer, errServer, apiServer, authServer, failServer, guardServer, toolServer, slowServer, webServer, gwServer]) s.close();
   if (tokenUrlBak) process.env.ANTHROPIC_TOKEN_URL = tokenUrlBak;

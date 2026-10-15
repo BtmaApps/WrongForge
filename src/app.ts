@@ -8,6 +8,7 @@
  *   WRONGFORGE_LOG_STDERR=1        also print every log line to stderr
  *   WRONGFORGE_LOG_MAX_MB          size at which a day's log file rolls over (default 50)
  *   CLAUDE_MODEL                   default model (default claude-sonnet-5-5)
+ *   WRONGFORGE_EFFORT              default reasoning effort low|medium|high|off (default high)
  *   WRONGFORGE_MAX_CONCURRENCY     tasks running at once (default 2)
  *   WRONGFORGE_WORKDIR             default workdir for tasks that name none (default: none -> workdir is required)
  *   WRONGFORGE_ALLOWED_ROOTS       directories tasks may start in, separated by ; (Windows) or : (others)

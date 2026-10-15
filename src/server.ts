@@ -19,6 +19,9 @@
 
 import * as http from "node:http";
 import * as crypto from "node:crypto";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { ClaudeOAuth } from "./oauth.js";
 import { createApp, type App } from "./app.js";
 import { fetchPlanUsage } from "./usage.js";
@@ -55,17 +58,109 @@ export interface ServerOptions {
   app: App;
   /** Override the tool-guide directory shown in /v1/info (tests). */
   promptDir?: string;
+  /** Built dashboard directory to serve at "/" (default: <repo>/webui/dist). */
+  webuiDir?: string;
 }
+
+/** Where `npm run webui:build` drops the dashboard (next to src/, not cwd). */
+const DEFAULT_WEBUI_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "webui", "dist");
+
+const MIME: Record<string, string> = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".mjs": "text/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".ico": "image/x-icon",
+  ".json": "application/json; charset=utf-8",
+  ".map": "application/json; charset=utf-8",
+  ".woff": "font/woff",
+  ".woff2": "font/woff2",
+  ".txt": "text/plain; charset=utf-8",
+};
+
+const NOT_BUILT_PAGE = `<!doctype html>
+<html><head><meta charset="utf-8"><title>WrongForge dashboard</title>
+<style>body{background:#0b0e14;color:#c9d4e3;font:14px/1.6 ui-monospace,Consolas,monospace;display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0}
+div{max-width:34rem;padding:2rem}h1{color:#7aa2f7;font-size:1.1rem;margin:0 0 .8rem}code{color:#9ece6a}</style></head>
+<body><div>
+<h1>WrongForge dashboard — not built yet</h1>
+<p>The API is running (see <code>/v1/info</code>), but the web UI bundle is missing.
+Build it once:</p>
+<p><code>npm run webui:build</code></p>
+<p>then reload this page. For live development: <code>npm run webui</code>.</p>
+</div></body></html>`;
 
 export function createAgentServer(opts: ServerOptions): http.Server {
   const { app, oauth } = opts;
   const manager = app.manager;
   const keyBuf = Buffer.from(opts.apiKey);
+  const webuiDir = opts.webuiDir ?? DEFAULT_WEBUI_DIR;
 
-  const authorized = (req: http.IncomingMessage): boolean => {
+  const webuiBuilt = (): boolean => {
+    try {
+      return fs.statSync(path.join(webuiDir, "index.html")).isFile();
+    } catch {
+      return false;
+    }
+  };
+
+  /**
+   * Serves the built dashboard (public shell — the data still needs the API
+   * key). Client-side routes fall back to index.html; traversal is refused.
+   * Returns false when the path is not servable.
+   */
+  const serveWebui = (res: http.ServerResponse, pathname: string): boolean => {
+    if (!webuiBuilt()) {
+      if (pathname === "/" || pathname === "/index.html") {
+        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+        res.end(NOT_BUILT_PAGE);
+        return true;
+      }
+      return false;
+    }
+    let file = path.resolve(webuiDir, "." + decodeURIComponent(pathname));
+    if (file !== path.resolve(webuiDir) && !file.startsWith(path.resolve(webuiDir) + path.sep)) {
+      return false; // traversal — not ours to serve
+    }
+    try {
+      const stat = fs.statSync(file);
+      if (!stat.isFile()) throw new Error("not a file");
+      const ext = path.extname(file).toLowerCase();
+      res.writeHead(200, {
+        "Content-Type": MIME[ext] ?? "application/octet-stream",
+        "Content-Length": stat.size,
+        "Cache-Control": ext === ".html" ? "no-cache" : "public, max-age=3600",
+      });
+      fs.createReadStream(file).pipe(res);
+      return true;
+    } catch {
+      // SPA fallback: a deep link like /tasks/xyz has no file — the app routes it
+      const index = path.join(webuiDir, "index.html");
+      const stat = fs.statSync(index); // exists per webuiBuilt()
+      res.writeHead(200, {
+        "Content-Type": "text/html; charset=utf-8",
+        "Content-Length": stat.size,
+        "Cache-Control": "no-cache",
+      });
+      fs.createReadStream(index).pipe(res);
+      return true;
+    }
+  };
+
+  /**
+   * `Authorization: Bearer <key>` or `?key=` — browsers cannot set headers on
+   * EventSource/img tags, so the query form keeps the dashboard (and only it;
+   * the key is a localhost server key) workable. Never logged: http.request
+   * logs the path without the query string.
+   */
+  const authorized = (req: http.IncomingMessage, url: URL): boolean => {
     const m = /^Bearer (.+)$/i.exec(req.headers.authorization ?? "");
-    if (!m) return false;
-    const got = Buffer.from(m[1]!);
+    const candidate = m?.[1] ?? url.searchParams.get("key") ?? "";
+    if (!candidate) return false;
+    const got = Buffer.from(candidate);
     return got.length === keyBuf.length && crypto.timingSafeEqual(got, keyBuf);
   };
 
@@ -83,16 +178,21 @@ export function createAgentServer(opts: ServerOptions): http.Server {
     new Promise((resolve, reject) => {
       let size = 0;
       const chunks: Buffer[] = [];
+      let overflowed = false;
       req.on("data", (c: Buffer) => {
+        if (overflowed) return; // drain the rest so the 413 response reaches the client
         size += c.length;
         if (size > MAX_BODY) {
+          overflowed = true;
+          chunks.length = 0;
           reject(new HttpError(413, "body_too_large", `request body exceeds ${MAX_BODY} bytes`));
-          req.destroy();
           return;
         }
         chunks.push(c);
       });
-      req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+      req.on("end", () => {
+        if (!overflowed) resolve(Buffer.concat(chunks).toString("utf8"));
+      });
       req.on("error", reject);
     });
 
@@ -283,7 +383,7 @@ export function createAgentServer(opts: ServerOptions): http.Server {
       version: VERSION,
       protocol: 1,
       /** Optional submit features this server understands (older servers ignore unknown fields). */
-      features: ["builtin_tools"],
+      features: ["builtin_tools", "effort"],
       signed_in: oauth.signedIn,
       default_model: app.defaultModel,
       models: Object.keys(KNOWN_MODELS),
@@ -296,6 +396,7 @@ export function createAgentServer(opts: ServerOptions): http.Server {
       },
       context: { window: ctx.window, compact_at: ctx.compactAt, clear_at: ctx.clearAt, keep_turns: ctx.keepTurns },
       cache: { default: process.env.WRONGFORGE_CACHE || "1h", modes: ["5m", "1h", "off"] },
+      effort: { default: process.env.WRONGFORGE_EFFORT || "high", levels: ["low", "medium", "high", "off"] },
       limits: { max_body_bytes: MAX_BODY, max_steps: 500, default_max_steps: 50 },
       webhook: { signature: "HMAC-SHA256 over '<timestamp>.<body>', header X-WrongForge-Signature: sha256=<hex>", key: process.env.WRONGFORGE_WEBHOOK_SECRET ? "WRONGFORGE_WEBHOOK_SECRET" : "the API key" },
       tools: Object.keys(agentTools),
@@ -421,7 +522,17 @@ export function createAgentServer(opts: ServerOptions): http.Server {
       const c = manager.counts();
       return json(res, 200, { ok: true, name: APP_NAME, version: VERSION, signed_in: oauth.signedIn, ...c });
     }
-    if (!authorized(req)) {
+    // The dashboard shell is public (its data still requires the key below);
+    // everything under /v1 stays API-only.
+    if (method === "GET" && parts[0] !== "v1") {
+      if (serveWebui(res, url.pathname)) return;
+      if (url.pathname === "/") {
+        res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
+        res.end("WrongForge API — see /v1/info. Dashboard: npm run webui:build\n");
+        return;
+      }
+    }
+    if (!authorized(req, url)) {
       res.setHeader("WWW-Authenticate", "Bearer");
       throw new HttpError(401, "unauthorized", "missing or wrong API key (send `Authorization: Bearer <key>`)");
     }
@@ -573,6 +684,9 @@ export async function startEnvServer(): Promise<EnvServer> {
         mcpServers: app.mcp.status().servers.length,
         recoveredTasks: recovered.length,
       });
+      if (fs.existsSync(path.join(DEFAULT_WEBUI_DIR, "index.html"))) {
+        console.log(`  dashboard:   http://${host}:${port}/`);
+      }
       resolveListen();
     });
   });

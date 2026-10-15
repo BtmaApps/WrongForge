@@ -7,7 +7,7 @@
  *   npm run models           # live model list (requires login)
  *   npm start                # chat REPL
  *
- * REPL commands: /exit /reset /status /model <id> /models /tools /help
+ * REPL commands: /exit /reset /status /model <id> /effort [lvl] /models /tools /help
  */
 
 import * as readline from "node:readline";
@@ -17,6 +17,14 @@ import { configHelp } from "./config.js";
 import { createClaudeClient } from "./provider.js";
 import { agentTools } from "./tools/index.js";
 import { runAgentTurn, DEFAULT_MODEL, KNOWN_MODELS } from "./agent.js";
+import {
+  defaultEffort,
+  effortSupport,
+  isEffortSetting,
+  resolveEffort,
+  sessionEffort,
+  setSessionEffort,
+} from "./effort.js";
 import { fetchModelList } from "./models.js";
 import { fetchPlanUsage, usageLine } from "./usage.js";
 import * as crypto from "node:crypto";
@@ -27,12 +35,22 @@ Commands:
   /status          session and model status
   /usage           plan limits: 5h session window, weekly limit, extra usage
   /model <id>      switch model (e.g. claude-sonnet-5-5, claude-opus-5-5)
+  /effort [lvl]    show or set reasoning effort: low | medium | high | off
   /models          live model list (requires a signed-in session)
   /reset           clear the conversation history
   /tools           list available tools
   /exit            quit
 Everything else is sent to the model.
 `;
+
+/** What effort currently means for a model, accounting for its support. */
+const effortLine = (model: string): string => {
+  const setting = sessionEffort() ?? defaultEffort();
+  const r = resolveEffort(setting, model);
+  if (setting === "off") return "off";
+  if (r.unsupported) return `${setting} (model has no effort support — parameter not sent)`;
+  return r.clamped ? `${setting} → ${r.effort} (clamped to model support)` : String(r.effort);
+};
 
 /** Exported for the in-process test suite (argv can be passed explicitly). */
 export async function main(argv: string[] = process.argv.slice(2)): Promise<void> {
@@ -132,7 +150,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
   const history: AgentMessage[] = [];
 
   const client = createClaudeClient(oauth);
-  console.log(`WrongForge — model: ${modelId}`);
+  console.log(`WrongForge — model: ${modelId} · effort: ${effortLine(modelId)}`);
   console.log(HELP);
 
   const rl = readline.createInterface({
@@ -164,7 +182,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
       return;
     }
     if (text === "/status") {
-      console.log(JSON.stringify({ ...oauth.status(), model: modelId }, null, 2));
+      console.log(JSON.stringify({ ...oauth.status(), model: modelId, effort: effortLine(modelId) }, null, 2));
       rl.prompt();
       return;
     }
@@ -209,7 +227,22 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
     }
     if (text.startsWith("/model ")) {
       modelId = text.slice("/model ".length).trim();
-      console.log(`model: ${modelId}`);
+      console.log(`model: ${modelId} · effort: ${effortLine(modelId)}`);
+      rl.prompt();
+      return;
+    }
+    if (text === "/effort" || text.startsWith("/effort ")) {
+      const arg = text.slice("/effort".length).trim().toLowerCase();
+      if (!arg) {
+        const supported = effortSupport(modelId);
+        console.log(`effort: ${effortLine(modelId)}`);
+        console.log(`levels: low | medium | high | off · this model supports: ${supported.length ? supported.join(", ") : "none"}`);
+      } else if (isEffortSetting(arg)) {
+        setSessionEffort(arg);
+        console.log(`effort: ${effortLine(modelId)}`);
+      } else {
+        console.log('effort must be "low", "medium", "high" or "off"');
+      }
       rl.prompt();
       return;
     }

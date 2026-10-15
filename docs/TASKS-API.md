@@ -26,12 +26,20 @@ npm run serve           # http://127.0.0.1:8787  (PORT / HOST override)
 ```
 
 Every route except `GET /health` needs `Authorization: Bearer <key>`
-(compared in constant time). The key is resolved at startup:
+(compared in constant time); `?key=` on the URL is accepted as an alternative
+for browser clients that cannot set headers (EventSource) — the query string
+is never logged. The key is resolved at startup:
 
 1. `AGENT_API_KEY` (must be ≥ 16 chars, otherwise the server refuses to start);
 2. else the saved key in `<data dir>/api-key`;
 3. else a strong key (`wf_…`) is generated, saved there (mode 0600) and shown in
    the startup banner.
+
+The server also serves a built dashboard (React + Radix UI + React Flow) at
+`/` when `webui/dist` exists (`npm run webui:build`): live firehose, task
+detail with per-step request/response traffic, sessions, and a graph view of
+the running system. The shell itself is public; every piece of data still
+requires the key.
 
 A missing or wrong key → `401 unauthorized`. Request bodies are capped at
 1 000 000 bytes (`413 body_too_large`).
@@ -60,6 +68,7 @@ Submits a task. Body (JSON object):
 | `workdir` | string | server default | Directory to run in; absolute, or relative to the server's default workdir. **Required** when the server has no default (`WRONGFORGE_WORKDIR`). Must exist; symlinks are resolved; checked against `WRONGFORGE_ALLOWED_ROOTS`. |
 | `workdir_lock` | boolean | `WRONGFORGE_WORKDIR_LOCK` or `false` | Exclusive use of the workdir (see [Concurrency](#concurrency)). |
 | `cache` | `"5m"` \| `"1h"` \| `"off"` | `WRONGFORGE_CACHE` or `"1h"` | Prompt-cache lifetime for this task's requests. |
+| `effort` | `"low"` \| `"medium"` \| `"high"` \| `"off"` | `WRONGFORGE_EFFORT` or `"high"` | Reasoning effort for this task's requests. Clamped to the levels the model supports; models without effort support never receive the field; `"off"` never sends it. |
 | `env` | object of strings | `{}` | Extra environment variables for the `bash` tool. ≤ 50 entries, names `[A-Za-z_][A-Za-z0-9_]{0,99}`, values ≤ 8192 chars. **Values are never persisted or logged** — only the names (`env_keys`). |
 | `system_append` | string | – | Extra instructions appended to the system prompt, ≤ 20 000 chars. |
 | `context` | any JSON | – | Opaque data echoed back untouched in the task document. |
@@ -108,6 +117,7 @@ Persisted as `tasks/<id>/task.json`.
   "workdir": "D:\\work\\app",          // canonical absolute path
   "workdir_lock": false,
   "cache": "1h",
+  "effort": "high",                    // low | medium | high | off
   "env_keys": ["API_URL"],             // names only
   "system_append": "…",                // if given
   "context": { },                      // if given, untouched
@@ -213,13 +223,14 @@ Queue state is visible in `GET /health` (`queued`, `running`) and `GET /v1/info`
 | Type | `data` (main fields) |
 |---|---|
 | `task.queued` | `position`, `waiting_for`, `session_id`, `session_created`, `workdir` |
-| `task.started` | `model`, `workdir`, `session_id`, `session_created`, `resumed_messages`, `context_tokens`, `cache`, `max_steps`, `timeout_ms`, and `session_workdir_changed_from` when the session last worked in another directory |
+| `task.started` | `model`, `workdir`, `session_id`, `session_created`, `resumed_messages`, `context_tokens`, `cache`, `effort`, `max_steps`, `timeout_ms`, and `session_workdir_changed_from` when the session last worked in another directory |
 | `task.heartbeat` | `elapsed_ms`, `steps`, `tool_calls`, `current_tool`, `last_activity_at` |
 | `task.completed` | `result` |
 | `task.failed` | `error`, and `result` if there is one |
 | `task.cancelled` | `reason` |
 | `task.timed_out` | `timeout_ms` |
 | `step.started` | `step` |
+| `step.request` | `step`, `model`, `effort` (resolved, null when omitted), `max_tokens`, `messages`, `tools` — what this step sends to the model |
 | `step.finished` | `step`, `finish_reason`, `usage`, `context_tokens` |
 | `tools.loaded` | `source` (`discovery` \| `inline` \| `mcp`), `count`, `tools`, `hash`, `warnings`, plus `url`/`cached`/`error` (gateway) or `servers` (MCP) |
 | `session.compacting` | `reason` (`threshold` \| `flagged_after_overflow` \| `context_overflow`), `context_tokens`, `threshold`, `messages`, `keep_turns` |
@@ -398,7 +409,7 @@ old history may no longer apply.
 | Endpoint | Meaning |
 |---|---|
 | `GET /health` | **No auth.** `{ ok, name, version, signed_in, queued, running }` |
-| `GET /v1/info` | Capabilities and effective settings: `name`, `version`, `protocol` (1), `signed_in`, `default_model`, `models`, `queue` (`queued`, `running`, `max_concurrency`), `workdir` (`default`, `required`, `allowed_roots`, `lock_by_default`), `context`, `cache`, `limits` (`max_body_bytes`, `max_steps`, `default_max_steps`), `webhook` (signature scheme, which key), `tools`, `tool_guides`, `mcp` (config file, server count), `dirs` |
+| `GET /v1/info` | Capabilities and effective settings: `name`, `version`, `protocol` (1), `signed_in`, `default_model`, `models`, `queue` (`queued`, `running`, `max_concurrency`), `workdir` (`default`, `required`, `allowed_roots`, `lock_by_default`), `context`, `cache`, `effort` (`default`, `levels`), `limits` (`max_body_bytes`, `max_steps`, `default_max_steps`), `webhook` (signature scheme, which key), `tools`, `tool_guides`, `mcp` (config file, server count), `dirs` |
 | `GET /v1/tools` | `{ "tools": [{ name, description }] }` — the built-in tools |
 | `GET /v1/usage` | Plan usage of the signed-in subscription (`five_hour`, `weekly`, `extra_usage`), cached 5 min; `?force=1` bypasses the cache; `502 usage_unavailable` if it cannot be read |
 | `POST /v1/maintenance/run` | Run housekeeping now (log/task compression and retention, session pruning). Live tasks and busy sessions are never touched |

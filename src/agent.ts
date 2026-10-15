@@ -12,6 +12,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 import { agentTools } from "./tools/index.js";
 import { clearOldToolOutputs } from "./compaction.js";
+import { effectiveEffort, resolveEffort } from "./effort.js";
 import { runTool, type ToolSet } from "./tool.js";
 import { fromApiAssistantMessage, toApiMessages, type AgentMessage } from "./messages.js";
 
@@ -93,6 +94,16 @@ export interface ContextGuard {
 /** Structured events emitted while a turn runs (used by the HTTP server). */
 export type AgentEvent =
   | { type: "step_start"; step: number }
+  | {
+      type: "step_request";
+      step: number;
+      model: string;
+      /** Resolved effort sent with the request; null = the field is omitted. */
+      effort: string | null;
+      max_tokens: number;
+      messages: number;
+      tools: number;
+    }
   | { type: "step_finish"; step: number; finish_reason: string; usage: TokenUsage; context_tokens: number }
   | { type: "context_cleared"; cleared: number; context_tokens: number }
   | { type: "text"; delta: string }
@@ -165,6 +176,17 @@ export async function runAgentTurn(
 
       steps++;
       onEvent?.({ type: "step_start", step: steps });
+      // What is about to go OUT to the model — the request half of the live
+      // traffic view (the response half is text/tool/step_finish events).
+      onEvent?.({
+        type: "step_request",
+        step: steps,
+        model: modelId,
+        effort: resolveEffort(effectiveEffort(modelId), modelId).effort,
+        max_tokens: MAX_OUTPUT_TOKENS,
+        messages: history.length,
+        tools: apiTools.length,
+      });
 
       const stream = client.messages.stream(
         {

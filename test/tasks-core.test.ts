@@ -34,6 +34,7 @@ async function main(): Promise<void> {
   const info = (await h.api("GET", "/v1/info")).body;
   assert(info.protocol === 1 && info.workdir.required === true && info.default_model === "claude-sonnet-5-5", "info: protocol, workdir required, model");
   assert(info.tools.includes("report_progress") && info.tools.includes("mcp_call") && info.cache.default === "1h", "info lists tools and cache default");
+  assert(info.effort.default === "high" && info.features.includes("effort"), "info lists the effort default and feature");
   assert((await h.api("GET", "/v1/tools")).body.tools.some((t: any) => t.name === "bash"), "/v1/tools");
   assert((await h.api("GET", "/v1/nope")).status === 404, "unknown route -> 404");
 
@@ -47,6 +48,7 @@ async function main(): Promise<void> {
   await bad({ prompt: "x", workdir: path.join(dirA, "nope") }, 400, "invalid_workdir", "workdir that does not exist");
   await bad({ prompt: "x", workdir: path.join(dirA, "hello.txt") }, 400, "invalid_workdir", "workdir that is a file");
   await bad({ prompt: "x", workdir: dirA, cache: "forever" }, 400, "invalid_request", "bad cache mode");
+  await bad({ prompt: "x", workdir: dirA, effort: "turbo" }, 400, "invalid_request", "bad effort");
   await bad({ prompt: "x", workdir: dirA, session_id: "../evil" }, 400, "invalid_request", "path traversal in session_id");
   await bad({ prompt: "x", workdir: dirA, task_id: "a/b" }, 400, "invalid_request", "bad task_id");
   await bad({ prompt: "x", workdir: dirA, model: "bad model!" }, 400, "invalid_request", "bad model");
@@ -68,6 +70,7 @@ async function main(): Promise<void> {
   const t0 = created.body.task;
   assert(t0.id === "life-1" && /^ses_[0-9a-f]{16}$/.test(t0.session_id) && t0.session_created === true, "task id + generated session id");
   assert(t0.workdir === dirA && t0.cache === "1h" && t0.model === "claude-sonnet-5-5" && t0.workdir_lock === false, "record echoes workdir/cache/model/lock");
+  assert(t0.effort === "high", "record echoes the default effort");
   assert(JSON.stringify(t0.context) === '{"ticket":"WS-42"}', "context echoed untouched");
 
   const done = await h.waitTask("life-1");
@@ -83,6 +86,9 @@ async function main(): Promise<void> {
   assert(types(ev)[0] === "task.queued" && types(ev)[1] === "task.started" && types(ev).at(-1) === "task.completed", "queued -> started -> … -> completed");
   const started = ev.find((e: any) => e.type === "task.started").data;
   assert(started.workdir === dirA && started.model === "claude-sonnet-5-5" && started.cache === "1h", "task.started data");
+  assert(started.effort === "high", "task.started carries the effort");
+  const stepReq = ev.find((e: any) => e.type === "step.request");
+  assert(stepReq && stepReq.data.model === "claude-sonnet-5-5" && stepReq.data.effort === "high" && Number(stepReq.data.tools) > 0 && Number(stepReq.data.messages) > 0, "step.request carries the outgoing request facts");
   const tStart = ev.find((e: any) => e.type === "tool.started");
   const tEnd = ev.find((e: any) => e.type === "tool.finished");
   assert(tStart.data.name === "ls" && tStart.data.input.path === "." && tEnd.data.tool_call_id === tStart.data.tool_call_id, "tool.started / tool.finished pair");
@@ -200,6 +206,15 @@ async function main(): Promise<void> {
   await h2.api("POST", "/v1/tasks", { workdir: dirA, prompt: "[[say m]]", wait: true });
   assert(fake.turns().at(-1)!.body.model === "claude-sonnet-5-5", "default model otherwise");
 
+  // ============================================================ effort passthrough
+  assert(fake.turns().at(-1)!.body.effort === "high", "default effort is sent (high)");
+  await h2.api("POST", "/v1/tasks", { workdir: dirA, prompt: "[[say e]]", effort: "low", wait: true });
+  assert(fake.turns().at(-1)!.body.effort === "low", 'effort:"low" reaches the request body');
+  const effOff = (await h2.api("POST", "/v1/tasks", { workdir: dirA, prompt: "[[say e]]", effort: "off", wait: true })).body.task;
+  assert(!("effort" in fake.turns().at(-1)!.body) && effOff.effort === "off", 'effort:"off" omits the field');
+  const effOld = (await h2.api("POST", "/v1/tasks", { workdir: dirA, prompt: "[[say e]]", model: "claude-opus-4-1-20250805", wait: true })).body.task;
+  assert(!("effort" in fake.turns().at(-1)!.body) && effOld.effort === "high", "a pre-effort model never receives the field (setting kept)");
+
   // ============================================================ report_progress + todos
   const rp = (await h2.api("POST", "/v1/tasks", {
     workdir: dirA,
@@ -260,6 +275,33 @@ async function main(): Promise<void> {
   const cev = await h3.events("crashed-1");
   assert(cev.length === 4 && cev[3].seq === 4 && cev[3].type === "task.failed" && cev[3].data.error.code === "server_restarted", "terminal event continues the seq after the crash");
 
+  // ============================================================ MCP config endpoints
+  {
+    const fixture = path.join(import.meta.dirname ?? ".", "fixtures", "mini-mcp.mjs");
+    const put = await h3.api("PUT", "/v1/mcp/servers/mini?test=1", { command: process.execPath, args: [fixture, "stdio"] });
+    assert([200, 201].includes(put.status) && put.body.server, "mcp PUT + test");
+    const list = await h3.api("GET", "/v1/mcp/servers");
+    assert(list.status === 200 && list.body.servers.some((x: any) => x.name === "mini"), "mcp GET list");
+    const imp = await h3.api("POST", "/v1/mcp/import", { mcpServers: { imp1: { command: "node" } }, overwrite: false });
+    assert(imp.status === 200 && imp.body.added.includes("imp1"), "mcp POST import");
+    const tools = await h3.api("GET", "/v1/mcp/servers/mini/tools");
+    assert(tools.status === 200 && tools.body.tools.length > 0, "mcp GET tools");
+    const one = await h3.api("GET", "/v1/mcp/servers/mini/tools?tool=echo");
+    assert(one.status === 200 && one.body.tool.name === "echo", "mcp GET tools?tool=");
+    const miss = await h3.api("GET", "/v1/mcp/servers/mini/tools?tool=nope");
+    assert(miss.status === 404, "mcp GET tools?tool= missing 404");
+    const tst = await h3.api("POST", "/v1/mcp/servers/mini/test");
+    assert(tst.status === 200 && tst.body.ok, "mcp POST test");
+    const en = await h3.api("POST", "/v1/mcp/servers/imp1/enable");
+    assert(en.status === 200, "mcp POST enable");
+    const dis = await h3.api("POST", "/v1/mcp/servers/imp1/disable");
+    assert(dis.status === 200, "mcp POST disable");
+    const del = await h3.api("DELETE", "/v1/mcp/servers/imp1");
+    assert(del.status === 200, "mcp DELETE");
+    const delMiss = await h3.api("DELETE", "/v1/mcp/servers/ghost");
+    assert(delMiss.status === 404, "mcp DELETE unknown 404");
+  }
+
   // ============================================================ maintenance endpoint
   const old = (days: number) => new Date(Date.now() - days * 86_400_000).toISOString();
   const mk = (id: string, finishedDaysAgo: number) => {
@@ -282,9 +324,46 @@ async function main(): Promise<void> {
   assert(!mnt.body.tasks.compressed.includes("fresh-1") && !mnt.body.tasks.deleted.includes("fresh-1"), "fresh task untouched");
   void gzipFile;
 
+  // ============================================================ dashboard (static shell + ?key= auth)
+  {
+    const web = path.join(home3, "webui-dist");
+    fs.mkdirSync(path.join(web, "assets"), { recursive: true });
+    fs.writeFileSync(path.join(web, "index.html"), '<!doctype html><html><body>wf-dashboard-shell</body></html>');
+    fs.writeFileSync(path.join(web, "assets", "app.js"), "console.log('wf-asset')");
+    const h4 = await startHarness({ fake, webuiDir: web });
+    try {
+      // the shell is public; the data behind it is not
+      let r = await fetch(`${h4.base}/`);
+      assert(r.status === 200 && (r.headers.get("content-type") ?? "").includes("text/html") && (await r.text()).includes("wf-dashboard-shell"), "dashboard index served without a key");
+      r = await fetch(`${h4.base}/assets/app.js`);
+      assert(r.status === 200 && (r.headers.get("content-type") ?? "").includes("javascript") && (await r.text()).includes("wf-asset"), "asset served with its mime type");
+      r = await fetch(`${h4.base}/deep/client/route`);
+      assert(r.status === 200 && (await r.text()).includes("wf-dashboard-shell"), "SPA deep link falls back to index.html");
+      r = await fetch(`${h4.base}/..%2f..%2fpackage.json`);
+      assert(r.status !== 200 || !(await r.text()).includes("wrongforge"), "traversal outside webuiDir is refused");
+      // browsers cannot set headers on EventSource: ?key= must authenticate
+      r = await fetch(`${h4.base}/v1/info?key=${h4.key}`);
+      assert(r.status === 200 && (await r.json()).default_model, "query-string key authenticates");
+      r = await fetch(`${h4.base}/v1/info?key=wrong-key-wrong-key`);
+      assert(r.status === 401, "wrong query key is rejected");
+    } finally {
+      await h4.close();
+    }
+    // and when nothing is built, / explains how to build instead of a bare 404
+    const empty = path.join(home3, "webui-empty");
+    fs.mkdirSync(empty, { recursive: true });
+    const h5 = await startHarness({ fake, webuiDir: empty });
+    try {
+      const r = await fetch(`${h5.base}/`);
+      assert(r.status === 200 && (await r.text()).includes("webui:build"), "not-built hint page");
+    } finally {
+      await h5.close();
+    }
+  }
+
   await h3.close();
   await fake.close();
-  console.log("TASKS CORE TESTS PASSED ✓ (auth, validation, lifecycle, events, idempotency, wait/stream/replay/long-poll, sessions, cache prefix stability, restart continuity, recovery, maintenance)");
+  console.log("TASKS CORE TESTS PASSED ✓ (auth, validation, lifecycle, events, idempotency, wait/stream/replay/long-poll, sessions, cache prefix stability, restart continuity, recovery, maintenance, dashboard)");
 }
 
 main().then(

@@ -6,6 +6,7 @@
 import type { TokenUsage } from "../agent.js";
 import type { Todo } from "../tools/todo-state.js";
 import type { CacheMode } from "../cache.js";
+import type { EffortSetting } from "../effort.js";
 import type { GatewayInfo, GatewaySpec } from "../tools/gateway.js";
 
 /** `queued` and `running` are live; the other four are terminal. */
@@ -100,6 +101,11 @@ export interface TaskRecord {
   workdir_lock: boolean;
   /** Prompt-cache mode used for this task's requests. */
   cache: CacheMode;
+  /**
+   * Reasoning effort used for this task's requests ("off" = the field is not
+   * sent). Absent only on records persisted before the field existed.
+   */
+  effort?: EffortSetting;
   /** Names only — values are never persisted. */
   env_keys: string[];
   system_append?: string;
@@ -134,6 +140,7 @@ export type TaskEventType =
   | "task.cancelled"
   | "task.timed_out"
   | "step.started"
+  | "step.request"
   | "step.finished"
   | "tools.loaded"
   | "session.compacting"
@@ -177,6 +184,12 @@ export interface SubmitRequest {
   workdir_lock?: boolean;
   /** Prompt cache: "5m" | "1h" | "off" (default: server setting, "1h"). */
   cache?: CacheMode;
+  /**
+   * Reasoning effort: "low" | "medium" | "high" | "off" (default: server
+   * setting, "high"). Clamped to the levels the model supports; models with
+   * no effort support never receive the field.
+   */
+  effort?: EffortSetting;
   env?: Record<string, string>;
   system_append?: string;
   context?: unknown;

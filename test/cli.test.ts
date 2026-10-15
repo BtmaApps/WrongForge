@@ -189,7 +189,8 @@ async function main(): Promise<void> {
     env: { ...srvEnv, WF_ENTRY_WORKDIR: tmp },
     timeoutMs: 90_000,
   });
-  assert(entry.code === 0 && entry.out.includes("ENTRY-OK"), `server entry child: ${entry.out.slice(-300)} ${entry.err.slice(-300)}`);
+  if (!(entry.code === 0 && entry.out.includes("ENTRY-OK"))) { console.error("ENTRYFULL", entry.out.slice(-1500), "ERR:", entry.err.slice(-500)); }
+  assert(entry.code === 0 && entry.out.includes("ENTRY-OK"), `server entry child failed (code ${entry.code})`);
 
   // EADDRINUSE: two servers on one fixed port
   const fixed = await freePort();
@@ -283,13 +284,12 @@ data: ${JSON.stringify(o)}
   const toolPort = (toolMock.address() as { port: number }).port;
   const toolRun = await run("src/main.ts", [], {
     env: { ...replEnv, ANTHROPIC_BASE_URL: `http://127.0.0.1:${toolPort}` },
-    input: "call the tool
-",
-    laterInput: { afterMs: 10_000, text: "/exit
-" },
+    input: "call the tool\n",
+    laterInput: { afterMs: 10_000, text: "/exit\n" },
     timeoutMs: 40_000,
   });
-  assert(toolRun.out.includes("no_such_tool") && toolRun.out.includes("tool error"), "repl: unknown tool error printed");
+  const toolAll = toolRun.out + toolRun.err;
+  assert(toolAll.includes("no_such_tool") && toolAll.includes("tool error"), "repl: unknown tool error printed");
   toolMock.close();
 
   // failing turn: the mock answers 500 -> the error branch prints and the turn is rolled back
@@ -305,13 +305,12 @@ data: ${JSON.stringify(o)}
   const failPort = (failMock.address() as { port: number }).port;
   const errRun = await run("src/main.ts", ["chat"], {
     env: { ...replEnv, ANTHROPIC_BASE_URL: `http://127.0.0.1:${failPort}` },
-    input: "trigger the error
-",
-    laterInput: { afterMs: 12_000, text: "/exit
-" },
+    input: "trigger the error\n",
+    laterInput: { afterMs: 12_000, text: "/exit\n" },
     timeoutMs: 40_000,
   });
-  assert(errRun.out.includes("[error]"), "repl: error branch prints");
+  const errAll = errRun.out + errRun.err;
+  assert(errAll.includes("[error]"), "repl: error branch prints");
   failMock.close();
 
   // repl without a signed-in session: /models falls back to known list
