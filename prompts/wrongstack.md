@@ -49,4 +49,5 @@ If a `wstack_` call fails for a technical reason, say so in the report.
 - This machine is Windows. Your own shell tool (when you have it) runs
   cmd.exe: `tail`, `head`, `grep`, `sed` are not available there, so use your
   read/grep tools instead of piping shell output. `wstack_bash` runs
-  WrongStack's shell, which has the usual POSIX tools.
+  WrongStack's session shell, which is PowerShell here: use PowerShell syntax
+  (no `&&`-only chains on old shells, no `2>/dev/null`), e.g. `npm test`.

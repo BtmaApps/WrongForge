@@ -414,6 +414,50 @@ async function main(): Promise<void> {
   const last = gwCalls.at(-1)!;
   assert(last.u === "/tools/alpha/call" && (last.body as { input: unknown }).input, "gateway call posts input");
 
+  // cache_control rejection -> retried once without markers, then disabled
+  let cacheStep = 0;
+  const cacheServer = http.createServer((req, res) => {
+    if (req.url === "/v1/oauth/token") {
+      res.writeHead(200).end(JSON.stringify({ access_token: "a", refresh_token: "r", expires_in: 3600, scope: "s" }));
+      return;
+    }
+    cacheStep++;
+    if (cacheStep === 1) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "cache_control ttl is not supported" } }));
+    } else {
+      const chunks: Buffer[] = [];
+      req.on("data", (c: Buffer) => chunks.push(c));
+      req.on("end", () => {
+        const body = JSON.parse(Buffer.concat(chunks).toString());
+        if (cacheStep === 2 && JSON.stringify(body.system).includes("cache_control")) {
+          res.writeHead(400).end(JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "still has cache_control" } }));
+          return;
+        }
+        res.writeHead(200, { "Content-Type": "text/event-stream" });
+        const w = (o: unknown) => res.write(`event: ${String((o as { type: string }).type)}
+data: ${JSON.stringify(o)}
+
+`);
+        w({ type: "message_start", message: { id: "m", type: "message", role: "assistant", model: "x", content: [], stop_reason: null, usage: { input_tokens: 3, output_tokens: 1 } } });
+        w({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } });
+        w({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "nocache" } });
+        w({ type: "content_block_stop", index: 0 });
+        w({ type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 1 } });
+        w({ type: "message_stop" });
+        res.end();
+      });
+    }
+  });
+  const cachePort = await listen(cacheServer);
+  process.env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${cachePort}`;
+  process.env.ANTHROPIC_TOKEN_URL = `http://127.0.0.1:${cachePort}/v1/oauth/token`;
+  const cOauth = new ClaudeOAuth(path.join(tmp, "cache-tokens.json"));
+  cOauth.importFromClaudeCode(ccFile);
+  const cRun = await runAgentTurn(createClaudeClient(cOauth), "m", [{ role: "user", content: "x" }], 2);
+  assert(cRun.text === "nocache" && cacheStep === 2, "cache_control rejected -> retried clean");
+  cacheServer.close();
+
   // cleanup servers
   for (const s of [modelsServer, errServer, apiServer, authServer, failServer, guardServer, toolServer, slowServer, webServer, gwServer]) s.close();
   if (tokenUrlBak) process.env.ANTHROPIC_TOKEN_URL = tokenUrlBak;

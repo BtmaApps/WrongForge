@@ -32,7 +32,7 @@ interface RunResult {
   err: string;
 }
 
-function run(file: string, args: string[], opts: { env?: Record<string, string>; input?: string; cwd?: string; timeoutMs?: number; keepStdin?: boolean } = {}): Promise<RunResult> {
+function run(file: string, args: string[], opts: { env?: Record<string, string>; input?: string; cwd?: string; timeoutMs?: number; keepStdin?: boolean; laterInput?: { afterMs: number; text: string } } = {}): Promise<RunResult> {
   return new Promise((resolve, reject) => {
     const stripped = { ...process.env };
     for (const k of ["ANTHROPIC_BASE_URL", "ANTHROPIC_TOKEN_URL", "CLAUDE_OAUTH_CLIENT_ID", "ANTHROPIC_API_KEY"]) delete stripped[k];
@@ -61,7 +61,15 @@ function run(file: string, args: string[], opts: { env?: Record<string, string>;
     if (opts.input !== undefined) {
       child.stdin?.write(opts.input);
     }
-    if (!opts.keepStdin) child.stdin?.end();
+    if (opts.laterInput) {
+      // write more input after a delay, then close stdin so the child exits
+      // cleanly (a clean exit is what flushes its V8 coverage)
+      const { afterMs, text } = opts.laterInput;
+      setTimeout(() => {
+        child.stdin?.write(text);
+        child.stdin?.end();
+      }, afterMs).unref();
+    } else if (!opts.keepStdin) child.stdin?.end();
     child.on("error", reject);
     child.on("close", (code) => {
       clearTimeout(killer);
@@ -231,13 +239,11 @@ async function main(): Promise<void> {
     CLAUDE_OAUTH_CLIENT_ID: "cli-test",
   };
   // commands-only pass: piped lines never race an async turn
-  console.error("[mark] before commands run");
   const repl = await run("src/main.ts", [], {
     env: replEnv,
     input: ["/help", "/status", "/tools", "/model claude-haiku-5-5", "/reset", "/nope", "/usage", "/exit"].join("\n"),
     timeoutMs: 60_000,
   });
-  console.error("[mark] commands done, out len", repl.out.length);
   assert(repl.out.includes("claude-haiku-5-5"), "repl: /model switches");
   assert(repl.out.includes("history cleared"), "repl: /reset");
   assert(repl.out.includes("unknown command"), "repl: unknown command");
@@ -245,27 +251,77 @@ async function main(): Promise<void> {
   assert(repl.out.includes("signedIn"), "repl: /status");
   assert(repl.out.includes("bash") && repl.out.includes("read"), "repl: /tools lists");
   // one real turn; stdin stays open, the timeout tree-kills the process
-  console.error("[mark] before turn run");
   const turnRun = await run("src/main.ts", [], {
     env: replEnv,
     input: "say exactly OK\n",
     keepStdin: true,
     timeoutMs: 15_000,
   });
-  console.error("[mark] turn done, out len", turnRun.out.length);
   assert(turnRun.out.includes("OK"), "repl: turn output");
   assert(turnRun.out.includes("end_turn"), "repl: usage footer");
 
+  // unknown-tool turn: the model calls a nonexistent tool -> tool-error print path
+  const toolMock = http.createServer((req, res) => {
+    if (req.url === "/v1/oauth/token") {
+      res.writeHead(200).end(JSON.stringify({ access_token: "a", refresh_token: "r", expires_in: 3600, scope: "s" }));
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "text/event-stream" });
+    const w = (o: unknown) => res.write(`event: ${String((o as { type: string }).type)}
+data: ${JSON.stringify(o)}
+
+`);
+    w({ type: "message_start", message: { id: "m", type: "message", role: "assistant", model: "x", content: [], stop_reason: null, usage: { input_tokens: 4, output_tokens: 1 } } });
+    w({ type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "tu9", name: "no_such_tool", input: {} } });
+    w({ type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: "{}" } });
+    w({ type: "content_block_stop", index: 0 });
+    w({ type: "message_delta", delta: { stop_reason: "tool_use" }, usage: { output_tokens: 2 } });
+    w({ type: "message_stop" });
+    res.end();
+  });
+  await new Promise<void>((r) => toolMock.listen(0, "127.0.0.1", r));
+  const toolPort = (toolMock.address() as { port: number }).port;
+  const toolRun = await run("src/main.ts", [], {
+    env: { ...replEnv, ANTHROPIC_BASE_URL: `http://127.0.0.1:${toolPort}` },
+    input: "call the tool
+",
+    laterInput: { afterMs: 10_000, text: "/exit
+" },
+    timeoutMs: 40_000,
+  });
+  assert(toolRun.out.includes("no_such_tool") && toolRun.out.includes("tool error"), "repl: unknown tool error printed");
+  toolMock.close();
+
+  // failing turn: the mock answers 500 -> the error branch prints and the turn is rolled back
+  const failMock = http.createServer((req, res) => {
+    if (req.url === "/v1/oauth/token") {
+      res.writeHead(200).end(JSON.stringify({ access_token: "a", refresh_token: "r", expires_in: 3600, scope: "s" }));
+      return;
+    }
+    res.writeHead(500, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ type: "error", error: { type: "api_error", message: "boom" } }));
+  });
+  await new Promise<void>((r) => failMock.listen(0, "127.0.0.1", r));
+  const failPort = (failMock.address() as { port: number }).port;
+  const errRun = await run("src/main.ts", ["chat"], {
+    env: { ...replEnv, ANTHROPIC_BASE_URL: `http://127.0.0.1:${failPort}` },
+    input: "trigger the error
+",
+    laterInput: { afterMs: 12_000, text: "/exit
+" },
+    timeoutMs: 40_000,
+  });
+  assert(errRun.out.includes("[error]"), "repl: error branch prints");
+  failMock.close();
+
   // repl without a signed-in session: /models falls back to known list
   const emptyHome = path.join(tmp, "empty-home");
-  console.error("[mark] before models run");
   const fastFailAuth = { ANTHROPIC_TOKEN_URL: "http://127.0.0.1:9/token", CLAUDE_OAUTH_CLIENT_ID: "x" };
   const r_models = await run("src/main.ts", [], {
     env: { WRONGFORGE_HOME: emptyHome, ...fastFailAuth },
     input: "/models\n/exit\n",
     timeoutMs: 60_000,
   });
-  console.error("[mark] models done", r_models.out.length);
   assert(r_models.out.includes("claude-sonnet-5-5"), "repl: /models known fallback");
 
   // repl: model from CLAUDE_MODEL env
@@ -274,13 +330,11 @@ async function main(): Promise<void> {
     input: "/exit\n",
     timeoutMs: 60_000,
   });
-  console.error("[mark] envmodel done");
   assert(r_envmodel.out.includes("claude-opus-5-5"), "repl: CLAUDE_MODEL env");
 
   // ======================================================== mcp-cli
   const mcpHome = path.join(tmp, "mcp-home");
   const mEnv = { WRONGFORGE_HOME: mcpHome };
-  console.error("[mark] mcp section");
   const m_add = await run("src/mcp-cli.ts", ["add", "fs", "--command", "node", "--", "server.js"], { env: mEnv });
   assert(m_add.code === 0 && m_add.out.includes("fs"), "mcp add");
   const m_addurl = await run("src/mcp-cli.ts", ["add", "remote", "--url", "https://example.com/mcp"], { env: mEnv });
@@ -297,8 +351,28 @@ async function main(): Promise<void> {
   assert(m_help.out.includes("Usage"), "mcp usage/help");
   const m_unknown = await run("src/mcp-cli.ts", ["frobnicate"], { env: mEnv });
   assert(m_unknown.code !== 0, "mcp unknown command fails");
+  const m_addjson = await run("src/mcp-cli.ts", ["add-json", "jj", '{"type":"http","url":"https://j.example"}'], { env: mEnv });
+  assert(m_addjson.code === 0 && m_addjson.out.includes("jj"), "mcp add-json");
+  const m_addjson_bad = await run("src/mcp-cli.ts", ["add-json", "jb", "{nope"], { env: mEnv });
+  assert(m_addjson_bad.code === 1 && m_addjson_bad.err.includes("not valid"), "mcp add-json invalid JSON");
+  const m_addflag = await run("src/mcp-cli.ts", ["add", "envy", "--command", "node", "--env", "A=1", "--env", "B=2", "--cwd", "C:\\", "--", "x.js"], { env: mEnv });
+  assert(m_addflag.code === 0, "mcp add with env/cwd flags");
+  const impFile = path.join(tmp, "imp.json");
+  fs.writeFileSync(impFile, JSON.stringify({ mcpServers: { one: { command: "node" }, two: { url: "https://two.example" }, bad: { nothing: true } } }));
+  const m_import = await run("src/mcp-cli.ts", ["import", impFile], { env: mEnv });
+  assert(m_import.code === 1 || m_import.code === 0, "mcp import runs");
+  assert(m_import.out.includes("one") && m_import.out.includes("invalid"), "mcp import reports");
+  const m_disable = await run("src/mcp-cli.ts", ["disable", "fs"], { env: mEnv });
+  assert(m_disable.code === 0, "mcp disable");
+  const m_enable = await run("src/mcp-cli.ts", ["enable", "fs"], { env: mEnv });
+  assert(m_enable.code === 0, "mcp enable");
+  const m_test_missing = await run("src/mcp-cli.ts", ["test", "ghost"], { env: mEnv, timeoutMs: 20_000 });
+  assert(m_test_missing.code === 1, "mcp test unknown server");
+  const m_call_missing = await run("src/mcp-cli.ts", ["call", "fs", "some-tool"], { env: mEnv, timeoutMs: 30_000 });
+  assert(m_call_missing.code === 1, "mcp call against unreachable stdio fails cleanly");
+  const m_json = await run("src/mcp-cli.ts", ["list", "--json"], { env: mEnv });
+  assert(m_json.code === 0 && m_json.out.includes("servers"), "mcp list --json");
 
-  console.error("[mark] all sections done");
   mock.close();
   console.log("CLI TESTS PASSED ✓ (init-config, paths migration, server entry, REPL, mcp-cli)");
 }

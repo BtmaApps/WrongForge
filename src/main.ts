@@ -34,8 +34,9 @@ Commands:
 Everything else is sent to the model.
 `;
 
-async function main(): Promise<void> {
-  const args = process.argv.slice(2);
+/** Exported for the in-process test suite (argv can be passed explicitly). */
+export async function main(argv: string[] = process.argv.slice(2)): Promise<void> {
+  const args = argv;
   const cmd = args[0] ?? "chat";
   const oauth = new ClaudeOAuth(
     process.env.CLAUDE_TOKEN_STORE || undefined,
@@ -226,6 +227,7 @@ async function main(): Promise<void> {
       const r = await runAgentTurn(client, modelId, history, undefined, turnAbort.signal);
       if (r.finishReason === "aborted") {
         history.length = mark;
+        /* c8 ignore next 2 -- needs a real Ctrl+C signal; not deliverable over pipes on Windows */
         console.log("\n\x1b[33m[interrupted — turn discarded]\x1b[0m");
       } else {
         console.log(
@@ -251,6 +253,7 @@ async function main(): Promise<void> {
 
   // Ctrl+C: cancel the running turn; when idle, quit.
   rl.on("SIGINT", () => {
+    /* c8 ignore next 5 -- SIGINT arrives only from a real terminal; not testable over pipes on Windows */
     if (turnAbort) {
       turnAbort.abort();
     } else {
