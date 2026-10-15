@@ -11,6 +11,7 @@ import { JsonPeek } from "./bits.js";
 import { shortId } from "../lib/types.js";
 
 const TYPE_TONE: Record<string, string> = {
+  "http.request": "ev-http",
   "task.queued": "ev-task",
   "task.started": "ev-task",
   "task.completed": "ev-done",
@@ -36,6 +37,8 @@ const TYPE_TONE: Record<string, string> = {
 function summarize(type: string, data: Record<string, unknown>): string {
   const u = data.usage as { input_tokens?: number; output_tokens?: number } | undefined;
   switch (type) {
+    case "http.request":
+      return `${data.method} ${data.path} → ${data.status} · ${data.duration_ms}ms`;
     case "task.started":
       return `model=${data.model} workdir=${data.workdir} effort=${data.effort ?? "?"}`;
     case "task.completed":
@@ -75,6 +78,7 @@ export function LiveFeed({ onOpenTask }: { onOpenTask: (id: string) => void }) {
       feed.filter((r) => {
         if (!showHeartbeats && r.ev.type === "task.heartbeat") return false;
         if (filter === "all") return true;
+        if (filter === "http") return r.ev.type === "http.request";
         if (filter === "tasks") return r.ev.type.startsWith("task.");
         if (filter === "steps") return r.ev.type.startsWith("step.");
         if (filter === "tools") return r.ev.type.startsWith("tool");
@@ -100,6 +104,9 @@ export function LiveFeed({ onOpenTask }: { onOpenTask: (id: string) => void }) {
         >
           <ToggleGroup.Item value="all" className="seg-item">
             all
+          </ToggleGroup.Item>
+          <ToggleGroup.Item value="http" className="seg-item">
+            http
           </ToggleGroup.Item>
           <ToggleGroup.Item value="tasks" className="seg-item">
             tasks

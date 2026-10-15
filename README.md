@@ -82,12 +82,16 @@ while the server runs): a React + Radix UI single page that streams the global
 `/v1/events` feed over SSE and shows everything as it happens — a filterable
 live event firehose (per step: what went out to the model — model, effort,
 message/tool counts — and what came back — text, tool calls with inputs and
-outputs, usage), a task table with a per-step detail view, sessions with
-context usage and stored messages, plan usage, and a React Flow graph of the
-whole system (WrongStack → tasks → models ↔ tools, workdirs) where active
-edges animate. The browser asks for the server API key once (`?key=` on the
-URL also works — browsers cannot set headers on EventSource); only the shell
-is public, all data stays behind the key.
+outputs, usage), incoming HTTP traffic as `http.request` frames (every `/v1`
+call, method/path/status/duration — the feed visibly ticks even while no task
+runs), a task table with a per-step detail view, sessions with context usage
+and stored messages, plan usage, and a React Flow graph of the whole system
+(WrongStack → tasks → models ↔ tools, workdirs) where active edges animate.
+The feed is live-only but seeded with the newest tasks' recent events on
+connect, so the page opens with history instead of an empty screen. The
+browser asks for the server API key once (`?key=` on the URL also works —
+browsers cannot set headers on EventSource); only the shell is public, all
+data stays behind the key.
 
 `npm run import` reads `claudeAiOauth` from `~/.claude/.credentials.json`
 (Claude Code CLI's stored session) into this app's encrypted token store. The

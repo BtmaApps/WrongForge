@@ -76,6 +76,8 @@ class Store {
   private listeners = new Set<Listener>();
   private disconnect: (() => void) | null = null;
   private usageTimer: ReturnType<typeof setInterval> | null = null;
+  private seeded = false;
+  private httpSeq = 0;
 
   getState = (): State => this.state;
 
@@ -113,7 +115,10 @@ class Store {
     this.disconnectSse();
     this.disconnect = connectEvents(
       key,
-      (ev) => this.applyEvent(ev),
+      (ev) => {
+        if (ev.type === "http.request") this.applyHttp(ev as unknown as Parameters<Store["applyHttp"]>[0]);
+        else this.applyEvent(ev);
+      },
       (s) => {
         this.set(() => ({ conn: s }));
         if (s === "open") void this.refresh(); // live-only feed: catch up after a gap
@@ -154,9 +159,41 @@ class Store {
         // detail view reads them until the task is dismissed
         perTask: new Map([...s.perTask].filter(([id]) => tasks.has(id) || s.perTask.get(id)!.length < PER_TASK_CAP)),
       }));
+      if (!this.seeded) {
+        this.seeded = true;
+        await this.seedFeed(tasksRes.tasks.slice(0, 3).map((t) => t.id));
+      }
     } catch {
       /* transient — the next reconnect retries */
     }
+  }
+
+  /**
+   * The global feed is live-only, so a freshly opened dashboard would stare
+   * at "waiting for events…". Seed it with the recent past: the events of
+   * the newest few tasks (heartbeats skipped), merged with anything that
+   * already arrived live.
+   */
+  private async seedFeed(ids: string[]): Promise<void> {
+    const rows: FeedRow[] = [];
+    for (const id of ids) {
+      try {
+        const res = await api<{ events: TaskEvent[] }>(`/v1/tasks/${id}/events?limit=2000`, this.state.key);
+        for (const ev of res.events) {
+          if (ev.type === "task.heartbeat") continue;
+          rows.push({ key: `${ev.task_id}:${ev.seq}`, at: Date.parse(ev.ts) || 0, ev });
+        }
+      } catch {
+        /* task vanished mid-seed — skip it */
+      }
+    }
+    if (!rows.length) return;
+    this.set((s) => {
+      const have = new Set(s.feed.map((r) => r.key));
+      const merged = [...rows.filter((r) => !have.has(r.key)), ...s.feed];
+      merged.sort((a, b) => a.at - b.at);
+      return { feed: merged.slice(-FEED_CAP) };
+    });
   }
 
   async refreshUsage(): Promise<void> {
@@ -190,6 +227,27 @@ class Store {
   }
 
   // ------------------------------------------------------------ live events
+
+  /** HTTP-traffic frame as the server sends it (top-level fields, no envelope). */
+  private applyHttp(e: {
+    ts?: string;
+    method?: string;
+    path?: string;
+    status?: number;
+    duration_ms?: number;
+  }): void {
+    const ev: TaskEvent = {
+      seq: 0,
+      ts: e.ts ?? new Date().toISOString(),
+      task_id: "—",
+      session_id: "—",
+      type: "http.request",
+      data: { method: e.method ?? "?", path: e.path ?? "?", status: e.status ?? 0, duration_ms: e.duration_ms ?? 0 },
+    };
+    this.set((s) => ({
+      feed: [...s.feed, { key: `http:${++this.httpSeq}`, at: Date.now(), ev }].slice(-FEED_CAP),
+    }));
+  }
 
   applyEvent(ev: TaskEvent): void {
     const at = Date.now();
@@ -326,8 +384,6 @@ function patchTask(doc: TaskRecord, ev: TaskEvent): TaskRecord {
       break;
     case "agent.todos":
       d.progress.todos = ev.data.todos as TaskRecord["progress"]["todos"];
-      break;
-    case "task.completed":
       break;
   }
   return d;

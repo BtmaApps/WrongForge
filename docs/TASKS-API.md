@@ -298,6 +298,11 @@ data: {"task_id":"tsk_…","status":"completed"}
 Live SSE feed of **all** tasks (no replay): `?task_id=` and `?session_id=` filter
 it. Events have no `id:`. Use it for dashboards.
 
+The feed also carries `http.request` frames — `{ type, ts, method, path,
+status, duration_ms }` for every `/v1` call as it completes (the stream itself
+excluded). They are fire-and-forget, never persisted, so the dashboard can show
+incoming traffic even while no task is running.
+
 ## Webhooks
 
 With `callback: { "url": "https://…", "events": ["task.*", "tool.*"] }` the

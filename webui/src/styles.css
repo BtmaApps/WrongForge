@@ -385,6 +385,8 @@ body {
   color: var(--fg);
 }
 
+.ev-http .feed-type,
+.ev-http .feed-body { color: var(--fg-dim); }
 .ev-task .feed-type { color: var(--violet); }
 .ev-done .feed-type { color: var(--green); }
 .ev-req { border-left-color: var(--cyan); }

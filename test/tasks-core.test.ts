@@ -346,6 +346,36 @@ async function main(): Promise<void> {
       assert(r.status === 200 && (await r.json()).default_model, "query-string key authenticates");
       r = await fetch(`${h4.base}/v1/info?key=wrong-key-wrong-key`);
       assert(r.status === 401, "wrong query key is rejected");
+
+      // the global SSE feed also carries live HTTP traffic: every /v1 call
+      // (except the stream itself) arrives as an http.request frame
+      const ac = new AbortController();
+      const sseRes = await fetch(`${h4.base}/v1/events?key=${h4.key}`, { headers: { Accept: "text/event-stream" }, signal: ac.signal });
+      assert(sseRes.status === 200 && sseRes.body, "global SSE connects with the query key");
+      const sseText = { out: "" };
+      const reading = (async () => {
+        const reader = sseRes.body!.getReader();
+        const dec = new TextDecoder();
+        try {
+          for (;;) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            sseText.out += dec.decode(value, { stream: true });
+          }
+        } catch {
+          /* aborted — that is the normal end of this check */
+        }
+      })();
+      await sleep(150); // let the stream (and its traffic tap) attach server-side
+      await h4.api("GET", "/v1/info");
+      let sawHttp = false;
+      for (let i = 0; i < 50 && !sawHttp; i++) {
+        sawHttp = sseText.out.includes("event: http.request") && sseText.out.includes(`"path":"/v1/info"`);
+        if (!sawHttp) await sleep(100);
+      }
+      assert(sawHttp, "global SSE carries live http.request frames for /v1 calls");
+      ac.abort();
+      await reading;
     } finally {
       await h4.close();
     }

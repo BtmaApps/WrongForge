@@ -42,6 +42,20 @@ const MAX_BODY = 1_000_000;
 const TERMINAL_EVENTS = new Set(["task.completed", "task.failed", "task.cancelled", "task.timed_out"]);
 const ALL_STATUSES: TaskStatus[] = ["queued", "running", "completed", "failed", "cancelled", "timed_out"];
 
+/**
+ * Live HTTP-traffic frame for the dashboard's global SSE feed: what hits the
+ * API right now, method/path/status/duration. Fire-and-forget — never
+ * persisted, never part of the task event protocol.
+ */
+export interface HttpTapEvent {
+  type: "http.request";
+  ts: string;
+  method: string;
+  path: string;
+  status: number;
+  duration_ms: number;
+}
+
 class HttpError extends Error {
   constructor(
     readonly status: number,
@@ -106,6 +120,9 @@ export function createAgentServer(opts: ServerOptions): http.Server {
       return false;
     }
   };
+
+  /** Subscribers of the live HTTP-traffic view (the global SSE feed). */
+  const httpTaps = new Set<(e: HttpTapEvent) => void>();
 
   /**
    * Serves the built dashboard (public shell — the data still needs the API
@@ -367,9 +384,16 @@ export function createAgentServer(opts: ServerOptions): http.Server {
       if (sessionFilter && ev.session_id !== sessionFilter) return;
       res.write(`event: ${ev.type}\ndata: ${JSON.stringify(ev)}\n\n`);
     });
+    // live HTTP traffic: every /v1 call except this stream itself (watching
+    // the watcher would drown the feed). Not persisted — pure live view.
+    const tap = (e: HttpTapEvent): void => {
+      if (!res.writableEnded) res.write(`event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`);
+    };
+    httpTaps.add(tap);
     const ping = setInterval(() => res.write(": ping\n\n"), 15_000);
     res.on("close", () => {
       unsub();
+      httpTaps.delete(tap);
       clearInterval(ping);
     });
   }
@@ -613,6 +637,19 @@ export function createAgentServer(opts: ServerOptions): http.Server {
       app.logger.log(req.method === "GET" ? "debug" : "info", "http.request", {
         method: req.method, path, status: res.statusCode, duration_ms: Date.now() - started, ip: req.socket.remoteAddress,
       });
+      // dashboard live view: everything under /v1 except the SSE stream
+      // itself (watching the watcher would drown the feed in its own pings)
+      if (path.startsWith("/v1") && path !== "/v1/events") {
+        const tap: HttpTapEvent = {
+          type: "http.request",
+          ts: new Date().toISOString(),
+          method: req.method ?? "?",
+          path,
+          status: res.statusCode,
+          duration_ms: Date.now() - started,
+        };
+        for (const t of httpTaps) t(tap);
+      }
     });
     dispatch(req, res).catch((e: unknown) => {
       if (res.headersSent) {
