@@ -1,0 +1,29 @@
+{
+  "name": "wrongforge",
+  "version": "0.3.0",
+  "private": true,
+  "type": "module",
+  "description": "WrongForge — standalone agentic tool that performs Claude Code-style operations for WrongStack (CLI + HTTP API with live tool-call stream), built on the Vercel AI SDK",
+  "scripts": {
+    "config:init": "tsx src/init-config.ts",
+    "start": "tsx src/main.ts",
+    "serve": "tsx src/server.ts",
+    "login": "tsx src/main.ts login",
+    "import": "tsx src/main.ts import",
+    "status": "tsx src/main.ts status",
+    "url": "tsx src/main.ts url",
+    "models": "tsx src/main.ts models",
+    "test": "tsx test/tools.test.ts && tsx test/oauth-mock.test.ts && tsx test/agent-e2e.test.ts && tsx test/server.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "^4.0.80",
+    "ai": "^7.0.141",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  }
+}
