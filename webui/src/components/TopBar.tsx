@@ -1,6 +1,5 @@
 /** Brand + connection state + server facts + plan usage strip. */
-
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useStore } from "../lib/store.js";
 import { Chip, Tip } from "./bits.js";
 import { fmtTokens } from "../lib/types.js";
@@ -11,12 +10,27 @@ export function TopBar() {
   const totals = useStore((s) => s.totals);
   const usage = useStore((s) => s.usage);
   const feed = useStore((s) => s.feed);
+  const http = useStore((s) => s.http);
+  const lastActivityAt = useStore((s) => s.lastActivityAt);
 
-  const lastEventAge = useMemo(() => (feed.length ? feed[feed.length - 1]!.at : 0), [feed]);
+  // re-render every second so the "last event Ns ago" labels actually tick
+  // instead of freezing until the next event arrives
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1_000);
+    return () => clearInterval(t);
+  }, []);
+
+  const lastEventAge = lastActivityAt || (feed.length ? feed[feed.length - 1]!.at : 0);
+  const idleSec = lastEventAge ? Math.max(0, Math.round((now - lastEventAge) / 1000)) : null;
   const connClass = conn === "open" ? "conn-open" : conn === "locked" ? "conn-locked" : "conn-wait";
   const connLabel =
     conn === "open" ? "live" : conn === "locked" ? "no key" : conn === "connecting" ? "connecting…" : "reconnecting…";
-  const lastHint = lastEventAge ? ` · last event ${Math.max(0, Math.round((Date.now() - lastEventAge) / 1000))}s ago` : "";
+  const lastHint = idleSec === null ? "" : ` · last event ${idleSec}s ago`;
+
+  const rpm = useMemo(() => http.times.filter((t) => t > now - 60_000).length, [http, now]);
+  const lastHttp = http.last;
+  const lastHttpStatusTone = !lastHttp ? "" : lastHttp.status >= 500 ? "hstat-5xx" : lastHttp.status >= 400 ? "hstat-4xx" : "hstat-2xx";
 
   return (
     <header className="topbar">
@@ -30,6 +44,7 @@ export function TopBar() {
         <span className={`conn ${connClass}`}>
           <span className={`dot ${conn === "open" ? "dot-live" : ""}`} />
           {connLabel}
+          {idleSec !== null && <span className="conn-idle">{idleSec < 60 ? `${idleSec}s` : `${Math.round(idleSec / 60)}m`}</span>}
         </span>
       </Tip>
 
@@ -39,6 +54,11 @@ export function TopBar() {
           <Chip label="effort" value={info.effort.default} tone="tone-cyan" />
           <Chip label="queue" value={`${info.queue.running}/${info.queue.max_concurrency} · ${info.queue.queued} queued`} />
           <Chip label="requests" value={String(totals.requests)} tone="tone-cyan" />
+          <Chip
+            label="http"
+            value={`${http.total} · ${rpm}/min${http.errors ? ` · ${http.errors} err` : ""}`}
+            tone={http.errors ? "tone-red" : rpm > 0 ? "tone-green" : undefined}
+          />
           <Chip label="tokens" value={`↑${fmtTokens(totals.in)} ↓${fmtTokens(totals.out)}`} tone="tone-violet" />
           <Chip label="cache read" value={fmtTokens(totals.cacheRead)} tone="tone-green" />
           <Chip label="tool calls" value={String(totals.toolCalls)} />
@@ -46,6 +66,20 @@ export function TopBar() {
       )}
 
       <div className="topbar-right">
+        {lastHttp && (
+          <Tip text={`last API request · ${lastHttp.duration_ms}ms`}>
+            {/* key remounts on every request → the ping animation replays */}
+            <span className="http-last" key={http.total}>
+              <span className="http-last-ping" />
+              <span className="http-last-method">{lastHttp.method}</span>
+              <span className="http-last-path">{lastHttp.path}</span>
+              <span className={`http-last-status ${lastHttpStatusTone}`}>{lastHttp.status}</span>
+              <span className="http-last-age">
+                {lastHttp.duration_ms}ms · {Math.max(0, Math.round((now - lastHttp.at) / 1000))}s ago
+              </span>
+            </span>
+          </Tip>
+        )}
         {usage && (
           <Tip
             text={`plan usage · 5h resets ${usage.five_hour.resetsAt ?? "?"}${usage.weekly ? ` · weekly ${usage.weekly.resetsAt ?? "?"}` : ""}`}

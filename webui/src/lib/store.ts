@@ -36,6 +36,15 @@ export interface Totals {
   cacheRead: number;
 }
 
+/** Live HTTP-traffic picture for the top bar: counters + the latest request. */
+export interface HttpLive {
+  total: number;
+  errors: number;
+  /** arrival timestamps (ms) of the last ≤2 minutes — the req/min meter. */
+  times: number[];
+  last: { method: string; path: string; status: number; duration_ms: number; at: number } | null;
+}
+
 export type ConnectionState = "locked" | SseStatus;
 
 export interface State {
@@ -51,6 +60,10 @@ export interface State {
   perTask: Map<string, TaskEvent[]>;
   tools: Map<string, ToolStat>;
   totals: Totals;
+  /** live HTTP traffic (server replay + live taps) for the top bar. */
+  http: HttpLive;
+  /** ms timestamp of the very last event of any kind — drives "idle Xs". */
+  lastActivityAt: number;
   /** edge-id / node-id -> last-activity ts, drives the graph animations. */
   pulses: Map<string, number>;
   authError: string | null;
@@ -68,6 +81,8 @@ const initial: State = {
   perTask: new Map(),
   tools: new Map(),
   totals: { steps: 0, requests: 0, toolCalls: 0, in: 0, out: 0, cacheRead: 0 },
+  http: { total: 0, errors: 0, times: [], last: null },
+  lastActivityAt: 0,
   pulses: new Map(),
   authError: null,
 };
@@ -239,17 +254,33 @@ class Store {
     status?: number;
     duration_ms?: number;
   }): void {
+    // backlog frames arrive with their original ts — older than rows already
+    // on screen — so the feed keeps itself ordered by event time, not arrival
+    const at = Date.parse(e.ts ?? "") || Date.now();
+    const status = e.status ?? 0;
     const ev: TaskEvent = {
       seq: 0,
       ts: e.ts ?? new Date().toISOString(),
       task_id: "—",
       session_id: "—",
       type: "http.request",
-      data: { method: e.method ?? "?", path: e.path ?? "?", status: e.status ?? 0, duration_ms: e.duration_ms ?? 0 },
+      data: { method: e.method ?? "?", path: e.path ?? "?", status, duration_ms: e.duration_ms ?? 0 },
     };
-    this.set((s) => ({
-      feed: [...s.feed, { key: `http:${++this.httpSeq}`, at: Date.now(), ev }].slice(-FEED_CAP),
-    }));
+    this.set((s) => {
+      const feed = [...s.feed, { key: `http:${++this.httpSeq}`, at, ev }];
+      feed.sort((a, b) => a.at - b.at);
+      const minuteAgo = Date.now() - 60_000;
+      return {
+        feed: feed.slice(-FEED_CAP),
+        lastActivityAt: Date.now(),
+        http: {
+          total: s.http.total + 1,
+          errors: s.http.errors + (status >= 400 ? 1 : 0),
+          times: [...s.http.times, at].filter((t) => t > Date.now() - 120_000),
+          last: { method: e.method ?? "?", path: e.path ?? "?", status, duration_ms: e.duration_ms ?? 0, at },
+        },
+      };
+    });
   }
 
   applyEvent(ev: TaskEvent): void {
@@ -334,7 +365,7 @@ class Store {
         }
       }
 
-      return { feed: feed.slice(-FEED_CAP), perTask, tasks, tools, totals, pulses };
+      return { feed: feed.slice(-FEED_CAP), perTask, tasks, tools, totals, pulses, lastActivityAt: at };
     });
   }
 }

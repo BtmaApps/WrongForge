@@ -125,6 +125,50 @@ body {
   50% { box-shadow: 0 0 0 4px transparent; }
 }
 
+/* seconds since the last event, ticking inside the connection pill */
+.conn-idle {
+  color: var(--fg-faint);
+  border-left: 1px solid var(--line);
+  padding-left: 6px;
+  margin-left: 2px;
+}
+
+/* latest API request, always visible in the top bar regardless of tab */
+.http-last {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 7px;
+  font-family: var(--mono);
+  font-size: 11px;
+  border: 1px solid var(--line);
+  background: var(--bg-2);
+  border-radius: 6px;
+  padding: 3px 10px;
+  max-width: 46vw;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.http-last-ping {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--cyan);
+  align-self: center;
+  flex: none;
+  animation: ping-once 0.8s ease-out;
+}
+
+@keyframes ping-once {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--cyan) 70%, transparent); }
+  100% { box-shadow: 0 0 0 7px transparent; }
+}
+
+.http-last-method { color: var(--blue); font-weight: 600; }
+.http-last-path { color: var(--fg); overflow: hidden; text-overflow: ellipsis; }
+.http-last-status { font-weight: 600; }
+.http-last-age { color: var(--fg-faint); }
+
 .topbar-chips {
   display: flex;
   gap: 6px;
@@ -160,6 +204,7 @@ body {
 .tone-cyan .chip-value { color: var(--cyan); }
 .tone-violet .chip-value { color: var(--violet); }
 .tone-green .chip-value { color: var(--green); }
+.tone-red .chip-value { color: var(--red); }
 
 .topbar-right {
   margin-left: auto;
@@ -402,6 +447,56 @@ body {
 .ev-warn .feed-type { color: var(--amber); }
 .ev-report .feed-type { color: var(--violet); }
 .ev-dim { opacity: 0.45; }
+
+/* every row flashes in once when it mounts — the feed visibly *moves* */
+.feed-row {
+  animation: row-in 0.9s ease-out;
+}
+
+@keyframes row-in {
+  0% { background: color-mix(in srgb, var(--blue) 22%, transparent); transform: translateX(-6px); opacity: 0.4; }
+  100% { background: transparent; transform: none; opacity: 1; }
+}
+
+/* shaped http.request rows: method · path · status · duration */
+.feed-method {
+  flex: none;
+  width: 44px;
+  font-weight: 600;
+  color: var(--fg-dim);
+}
+.m-get { color: var(--blue); }
+.m-post { color: var(--cyan); }
+.m-put { color: var(--amber); }
+.m-delete { color: var(--red); }
+.m-patch { color: var(--violet); }
+
+.feed-path {
+  color: var(--fg);
+}
+
+.feed-status {
+  flex: none;
+  width: 30px;
+  text-align: right;
+  font-weight: 600;
+}
+.hstat-2xx { color: var(--green); }
+.hstat-4xx { color: var(--amber); }
+.hstat-5xx { color: var(--red); }
+.hstat-info { color: var(--fg-dim); }
+
+.feed-dur {
+  flex: none;
+  width: 52px;
+  text-align: right;
+  color: var(--fg-faint);
+}
+.dur-slow { color: var(--amber); }
+
+.ev-http.hstat-4xx { border-left-color: var(--amber); }
+.ev-http.hstat-5xx { border-left-color: var(--red); }
+.ev-http .feed-time { color: var(--fg-faint); }
 
 .json-peek {
   appearance: none;

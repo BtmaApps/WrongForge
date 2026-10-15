@@ -376,6 +376,35 @@ async function main(): Promise<void> {
       assert(sawHttp, "global SSE carries live http.request frames for /v1 calls");
       ac.abort();
       await reading;
+
+      // backlog replay: traffic that happened while no dashboard was connected
+      // must appear when one opens late — live-only taps would leave a freshly
+      // opened dashboard looking inexplicably empty
+      await h4.api("GET", "/v1/tools");
+      const ac2 = new AbortController();
+      const late = await fetch(`${h4.base}/v1/events?key=${h4.key}`, { headers: { Accept: "text/event-stream" }, signal: ac2.signal });
+      const lateText = { out: "" };
+      const reading2 = (async () => {
+        const reader = late.body!.getReader();
+        const dec = new TextDecoder();
+        try {
+          for (;;) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            lateText.out += dec.decode(value, { stream: true });
+          }
+        } catch {
+          /* aborted — that is the normal end of this check */
+        }
+      })();
+      let sawReplay = false;
+      for (let i = 0; i < 50 && !sawReplay; i++) {
+        sawReplay = lateText.out.includes("event: http.request") && lateText.out.includes(`"path":"/v1/tools"`);
+        if (!sawReplay) await sleep(100);
+      }
+      assert(sawReplay, "late-joining SSE subscriber gets the recent-traffic backlog replayed");
+      ac2.abort();
+      await reading2;
     } finally {
       await h4.close();
     }

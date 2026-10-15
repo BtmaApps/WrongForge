@@ -41,8 +41,6 @@ function summarize(type: string, data: Record<string, unknown>): string {
     | undefined;
   const err = data.error as { code?: string; message?: string } | string | undefined;
   switch (type) {
-    case "http.request":
-      return `${data.method} ${data.path} → ${data.status} · ${data.duration_ms}ms`;
     case "task.started":
       return `model=${data.model} workdir=${data.workdir} effort=${data.effort ?? "?"}`;
     case "task.completed":
@@ -70,6 +68,28 @@ function summarize(type: string, data: Record<string, unknown>): string {
     default:
       return "";
   }
+}
+
+/** HTTP status → tone class (rows and the top-bar ticker share these). */
+export function httpStatusClass(status: number): string {
+  return status >= 500 ? "hstat-5xx" : status >= 400 ? "hstat-4xx" : status >= 200 && status < 300 ? "hstat-2xx" : "hstat-info";
+}
+
+/** One API call as its own shaped row: method · path · status · duration. */
+function HttpRow({ data, ts }: { data: Record<string, unknown>; ts: string }) {
+  const method = String(data.method ?? "?");
+  const status = Number(data.status ?? 0);
+  const dur = Number(data.duration_ms ?? 0);
+  return (
+    <>
+      <span className="feed-time">{ts.slice(11, 23)}</span>
+      <span className="feed-type">→ api</span>
+      <span className={`feed-method m-${method.toLowerCase()}`}>{method}</span>
+      <span className="feed-body feed-path">{String(data.path ?? "?")}</span>
+      <span className={`feed-status ${httpStatusClass(status)}`}>{status}</span>
+      <span className={`feed-dur${dur >= 1000 ? " dur-slow" : ""}`}>{dur}ms</span>
+    </>
+  );
 }
 
 export function LiveFeed({ onOpenTask }: { onOpenTask: (id: string) => void }) {
@@ -145,17 +165,23 @@ export function LiveFeed({ onOpenTask }: { onOpenTask: (id: string) => void }) {
       </div>
       <div className="feed-scroll" ref={boxRef}>
         {rows.length === 0 && <div className="empty">waiting for events — submit a task and watch it flow…</div>}
-        {rows.map((r) => (
-          <div key={r.key} className={`feed-row ${TYPE_TONE[r.ev.type] ?? ""}`}>
-            <span className="feed-time">{r.ev.ts.slice(11, 23)}</span>
-            <span className="feed-type">{r.ev.type}</span>
-            <button className="feed-task" onClick={() => onOpenTask(r.ev.task_id)} title="open task detail">
-              {shortId(r.ev.task_id, 14)}
-            </button>
-            <span className="feed-body">{summarize(r.ev.type, r.ev.data)}</span>
-            <JsonPeek value={r.ev.data} label="{ }" max={0} />
-          </div>
-        ))}
+        {rows.map((r) =>
+          r.ev.type === "http.request" ? (
+            <div key={r.key} className={`feed-row ev-http ${httpStatusClass(Number(r.ev.data.status ?? 0))}`}>
+              <HttpRow data={r.ev.data} ts={r.ev.ts} />
+            </div>
+          ) : (
+            <div key={r.key} className={`feed-row ${TYPE_TONE[r.ev.type] ?? ""}`}>
+              <span className="feed-time">{r.ev.ts.slice(11, 23)}</span>
+              <span className="feed-type">{r.ev.type}</span>
+              <button className="feed-task" onClick={() => onOpenTask(r.ev.task_id)} title="open task detail">
+                {shortId(r.ev.task_id, 14)}
+              </button>
+              <span className="feed-body">{summarize(r.ev.type, r.ev.data)}</span>
+              <JsonPeek value={r.ev.data} label="{ }" max={0} />
+            </div>
+          ),
+        )}
       </div>
     </div>
   );

@@ -124,6 +124,19 @@ export function createAgentServer(opts: ServerOptions): http.Server {
 
   /** Subscribers of the live HTTP-traffic view (the global SSE feed). */
   const httpTaps = new Set<(e: HttpTapEvent) => void>();
+  /**
+   * Recent traffic, kept in memory only (never persisted): replayed to every
+   * new /v1/events subscriber so a freshly opened dashboard immediately sees
+   * what hit the API while it was closed — live-only taps would otherwise
+   * make past traffic invisible ("requests came but the feed looks empty").
+   */
+  const httpTapLog: HttpTapEvent[] = [];
+  const HTTP_TAP_LOG_CAP = 300;
+  const recordTap = (e: HttpTapEvent): void => {
+    httpTapLog.push(e);
+    if (httpTapLog.length > HTTP_TAP_LOG_CAP) httpTapLog.splice(0, httpTapLog.length - HTTP_TAP_LOG_CAP);
+    for (const t of httpTaps) t(e);
+  };
   // serve-console live view (TTY-gated, see liveview.ts): every request and
   // event as one line on stdout, right where `npm run serve` runs
   startLiveView({ events: manager, httpTaps });
@@ -383,6 +396,10 @@ export function createAgentServer(opts: ServerOptions): http.Server {
     const taskFilter = url.searchParams.get("task_id");
     const sessionFilter = url.searchParams.get("session_id");
     sseStart(res);
+    // Backlog first: the recent-traffic ring, so a dashboard opened late sees
+    // the requests that already happened. Everything below is synchronous —
+    // no live frame can fall into the gap before the subscriptions attach.
+    for (const e of httpTapLog) res.write(`event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`);
     const unsub = manager.subscribe((ev) => {
       if (taskFilter && ev.task_id !== taskFilter) return;
       if (sessionFilter && ev.session_id !== sessionFilter) return;
@@ -390,6 +407,8 @@ export function createAgentServer(opts: ServerOptions): http.Server {
     });
     // live HTTP traffic: every /v1 call except this stream itself (watching
     // the watcher would drown the feed). Not persisted — pure live view.
+    // The tap is on `finish`: a held-open request (wait/stream submit) only
+    // appears once it completes.
     const tap = (e: HttpTapEvent): void => {
       if (!res.writableEnded) res.write(`event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`);
     };
@@ -642,17 +661,17 @@ export function createAgentServer(opts: ServerOptions): http.Server {
         method: req.method, path, status: res.statusCode, duration_ms: Date.now() - started, ip: req.socket.remoteAddress,
       });
       // dashboard live view: everything under /v1 except the SSE stream
-      // itself (watching the watcher would drown the feed in its own pings)
+      // itself (watching the watcher would drown the feed in its own pings);
+      // recorded so late-joining dashboards get the backlog replayed
       if (path.startsWith("/v1") && path !== "/v1/events") {
-        const tap: HttpTapEvent = {
+        recordTap({
           type: "http.request",
           ts: new Date().toISOString(),
           method: req.method ?? "?",
           path,
           status: res.statusCode,
           duration_ms: Date.now() - started,
-        };
-        for (const t of httpTaps) t(tap);
+        });
       }
     });
     dispatch(req, res).catch((e: unknown) => {
