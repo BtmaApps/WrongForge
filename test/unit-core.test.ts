@@ -40,6 +40,7 @@ import { dynamicTool, runTool, tool } from "../src/tool.js";
 import { configHelp, configFilePath, loadOAuthConfig } from "../src/config.js";
 import { dataDir } from "../src/paths.js";
 import { renderBanner, printBanner } from "../src/banner.js";
+import { toApiInputSchema } from "../src/tools/util.js";
 import { buildTaskPreamble, buildTaskSystemPrompt, loadPromptFiles, promptDir } from "../src/prompt.js";
 import { fetchPlanUsage, untilLabel, usageLine } from "../src/usage.js";
 import { retentionFromEnv, runMaintenance, startMaintenance } from "../src/maintenance.js";
@@ -385,6 +386,67 @@ async function main(): Promise<void> {
     assert(applyEffortToBody(oldBody, "high") === null && !("effort" in oldBody), "old models get no effort field");
     const midBody = mkBody("claude-haiku-5-5");
     assert(applyEffortToBody(midBody, "medium") === "medium" && midBody.effort === "medium", "effort level forwarded verbatim");
+  }
+
+  // ================================================== tool schema flattening
+  {
+    // clean schemas pass through untouched
+    const clean = toApiInputSchema({ type: "object", properties: { a: { type: "string" } }, required: ["a"] });
+    assert(
+      clean.type === "object" && (clean.properties as { a?: unknown }).a !== undefined && (clean.required as string[])[0] === "a",
+      "clean schema passes through",
+    );
+
+    // allOf merges: union of properties and of required
+    const all = toApiInputSchema({
+      type: "object",
+      allOf: [
+        { type: "object", properties: { a: { type: "string" } }, required: ["a"] },
+        { properties: { b: { type: "number" } }, required: ["b"] },
+      ],
+    });
+    assert(
+      !("allOf" in all) && (all.properties as Record<string, unknown>).a !== undefined && (all.properties as Record<string, unknown>).b !== undefined &&
+        [...(all.required as string[])].sort().join(",") === "a,b",
+      "allOf merges into a strict union",
+    );
+
+    // anyOf merges permissively: required survives only if every branch demands it
+    const any = toApiInputSchema({
+      anyOf: [
+        { type: "object", properties: { mode: { type: "string" } }, required: ["mode"] },
+        { type: "object", properties: { path: { type: "string" } } },
+      ],
+    });
+    assert(
+      any.type === "object" && !("anyOf" in any) && (any.properties as Record<string, unknown>).mode !== undefined &&
+        (any.properties as Record<string, unknown>).path !== undefined && !("required" in any),
+      "anyOf merges into a permissive union (required dropped)",
+    );
+
+    // oneOf keeps the field every branch requires
+    const one = toApiInputSchema({
+      type: "object",
+      oneOf: [
+        { properties: { a: { type: "string" }, extra: { type: "string" } }, required: ["a", "extra"] },
+        { properties: { b: { type: "number" } }, required: ["a"] },
+      ],
+    });
+    assert(
+      !("oneOf" in one) && (one.required as string[]).join(",") === "a" && (one.properties as Record<string, unknown>).b !== undefined,
+      "oneOf keeps only the common required field",
+    );
+
+    // a bare non-object schema cannot describe a tool input: empty object fallback
+    const bare = toApiInputSchema({ type: "string", description: "just text" });
+    assert(bare.type === "object" && Object.keys(bare.properties as object).length === 0 && bare.description === "just text", "non-object schema falls back to an empty object, description kept");
+
+    // nested compositional keywords are the API's business — left untouched
+    const nested = toApiInputSchema({ type: "object", properties: { x: { anyOf: [{ type: "string" }, { type: "number" }] } } });
+    assert(((nested.properties as { x: { anyOf: unknown[] } }).x.anyOf as unknown[]).length === 2, "nested anyOf is left alone");
+
+    // garbage never throws
+    assert(toApiInputSchema(null).type === "object" && toApiInputSchema("nope").type === "object" && toApiInputSchema({}).type === "object", "garbage input never throws");
   }
 
   console.log("UNIT CORE TESTS PASSED ✓ (compaction, cache, effort, messages, tool, config, paths, banner, prompt, usage, maintenance)");

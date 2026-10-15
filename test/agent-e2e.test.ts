@@ -14,6 +14,7 @@ import type { AgentMessage } from "../src/messages.js";
 import { ClaudeOAuth } from "../src/oauth.js";
 import { createClaudeClient } from "../src/provider.js";
 import { runAgentTurn, DEFAULT_MODEL } from "../src/agent.js";
+import { dynamicTool } from "../src/tool.js";
 
 /** Writes one SSE event. */
 function sse(res: http.ServerResponse, obj: unknown): void {
@@ -152,7 +153,21 @@ function main(): Promise<void> {
         const history: AgentMessage[] = [
           { role: "user", content: "What is in this directory?" },
         ];
-        const result = await runAgentTurn(provider, DEFAULT_MODEL, history);
+        // a gateway-style tool whose schema the API refuses verbatim
+        // (top-level anyOf) — the agent must flatten it before sending
+        const unionTool = dynamicTool({
+          description: "union-shaped tool from an orchestrator",
+          inputSchema: {
+            anyOf: [
+              { type: "object", properties: { mode: { type: "string" } }, required: ["mode"] },
+              { type: "object", properties: { path: { type: "string" } } },
+            ],
+          },
+          execute: async () => ({ ok: true }),
+        });
+        const result = await runAgentTurn(provider, DEFAULT_MODEL, history, undefined, undefined, undefined, undefined, undefined, {
+          union_tool: unionTool,
+        });
 
         // --- assertions ---
         const assert = (cond: boolean, label: string) => {
@@ -162,6 +177,14 @@ function main(): Promise<void> {
         assert(messagesRequests.length === 2, "two LLM steps (tool + final)");
         assert(tokenCalls === 1, "token fetched once");
         assert(messagesRequests[0].body.effort === "high", "default effort (high) is sent on the agent path");
+        const apiToolDefs = messagesRequests[0].body.tools as Array<{ name: string; input_schema: Record<string, unknown> }>;
+        const uni = apiToolDefs.find((t) => t.name === "union_tool");
+        assert(
+          uni !== undefined && uni.input_schema.type === "object" && !("anyOf" in uni.input_schema) &&
+            (uni.input_schema.properties as Record<string, unknown>).mode !== undefined &&
+            (uni.input_schema.properties as Record<string, unknown>).path !== undefined,
+          "a top-level anyOf tool schema is flattened into an object union for the API",
+        );
 
         for (const [i, r] of messagesRequests.entries()) {
           assert(

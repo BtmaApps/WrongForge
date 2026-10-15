@@ -15,6 +15,7 @@ import { clearOldToolOutputs } from "./compaction.js";
 import { effectiveEffort, resolveEffort } from "./effort.js";
 import { runTool, type ToolSet } from "./tool.js";
 import { fromApiAssistantMessage, toApiMessages, type AgentMessage } from "./messages.js";
+import { toApiInputSchema } from "./tools/util.js";
 
 /**
  * Current model lineup — platform.claude.com/docs/en/models/overview (Oct 2026).
@@ -120,7 +121,9 @@ function apiToolSet(tools: ToolSet): Anthropic.Messages.Tool[] {
     return {
       name,
       description: t.description,
-      input_schema: schema as { type: "object" } & Record<string, unknown>,
+      // the API accepts a plain object only — orchestrator/MCP schemas with a
+      // top-level oneOf/allOf/anyOf are flattened (see toApiInputSchema)
+      input_schema: toApiInputSchema(schema),
     };
   });
 }
