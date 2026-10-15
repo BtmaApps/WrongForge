@@ -462,8 +462,7 @@ plus `unit-core` (compaction, cache, messages, config, paths, banner, prompts,
 usage, maintenance), `unit-net` (network-facing helpers), `unit-final` and `cli`
 (REPL / entry points). No test talks to Anthropic.
 
-> `test/server.test.ts` targets the removed `/v1/run` endpoint, is not part of
-> `npm test`, and currently fails — it needs porting to `/v1/tasks`.
+> The former `test/server.test.ts` (removed `/v1/run` endpoint) was retired; its live-surface checks — auth, tools, sessions, prompt and JSON validation — live in `test/tasks-core.test.ts`.
 
 ## Security notes
 
@@ -491,6 +490,5 @@ usage, maintenance), `unit-net` (network-facing helpers), `unit-final` and `cli`
   stop working without notice — see the privacy section; use `ANTHROPIC_API_KEY`
   for a supported path.
 - No sandbox, no per-command approval; tool calls within a step run sequentially.
-- `test/server.test.ts` is outdated (see Tests).
 - `src/app.ts` and `src/maintenance.ts` mention `npm run maintain`; that script is
   not defined in `package.json` (use `POST /v1/maintenance/run` or run the server).

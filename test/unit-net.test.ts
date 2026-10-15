@@ -366,7 +366,7 @@ async function main(): Promise<void> {
   assert(spec.url === "http://good.example/api", "validateGatewaySpec accepts listed host");
   const info = describeGateway(spec);
   assert(info.has_token && !info.inline, "describeGateway secrets-free");
-  const gwSpecForDefs = { url: "http://x.example" } as ReturnType<typeof validateGatewaySpec>;
+  const gwSpecForDefs = { url: "http://x.example", deny: ["grep", "fetch*"] } as ReturnType<typeof validateGatewaySpec>;
   const defs = normalizeDefs(
     [
       { name: "b", description: "B", input_schema: { type: "object" } },
@@ -376,13 +376,28 @@ async function main(): Promise<void> {
       { name: "wrongtype", input_schema: { type: "string" } },
       { name: "defaults", input_schema: {} },
       { name: "bash", input_schema: { type: "object" } },
+      { name: "grep", description: "G", input_schema: { type: "object" } },
+      { name: "fetch_url", description: "F", input_schema: { type: "object" } },
       42,
     ],
     gwSpecForDefs,
     new Set(["wstack_bash"]),
   );
   assert(defs.defs.map((d) => d.exposed).join(",") === "wstack_a,wstack_b,wstack_bad,wstack_defaults", "normalizeDefs sorts + dedupes + filters");
+  assert(!defs.defs.some((d) => d.remote === "grep"), "normalizeDefs deny skips denied tools");
+  assert(!defs.defs.some((d) => d.remote === "fetch_url"), "normalizeDefs deny skips wildcard-denied tools");
   assert(defs.warnings.some((w) => w.includes("without a name")) && defs.warnings.some((w) => w.includes("duplicate")), "normalizeDefs warnings");
+  const allowedDefs = normalizeDefs(
+    [
+      { name: "alpha", description: "AL", input_schema: { type: "object" } },
+      { name: "beta", description: "BE", input_schema: { type: "object" } },
+      { name: "adelete", description: "AD", input_schema: { type: "object" } },
+    ],
+    { url: "http://x.example", allow: ["a*"], deny: ["adelete"] } as ReturnType<typeof validateGatewaySpec>,
+    new Set(),
+  );
+  assert(allowedDefs.defs.map((d) => d.exposed).join(",") === "wstack_alpha", "normalizeDefs allow skips non-matching tools");
+  assert(!allowedDefs.defs.some((d) => d.remote === "adelete"), "normalizeDefs deny wins over allow on a both-matching tool");
 
   // gateway discovery + call against a mock orchestrator
   const gwCalls: Record<string, unknown>[] = [];
