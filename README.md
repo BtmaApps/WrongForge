@@ -77,6 +77,13 @@ npm run webui             # dashboard development (Vite on :5173, proxying the A
 
 Other `main.ts` subcommands: `url` (print an authorize URL), `logout`.
 
+**Serve-console live view:** while `npm run serve` runs in a terminal, every
+incoming HTTP request and every task event prints as one colored line right
+there — `GET /v1/tasks 200 2ms`, `● task.started`, `⇢ step.request …`,
+`⚑ tool.started ls`, `✔ task.completed` — so you can watch WrongStack's
+traffic without opening anything else (heartbeats are skipped; `NO_COLOR`
+disables the colors; `WRONGFORGE_LIVE=0` turns it off).
+
 **Live dashboard** (`npm run webui:build` once, then open `http://127.0.0.1:8787/`
 while the server runs): a React + Radix UI single page that streams the global
 `/v1/events` feed over SSE and shows everything as it happens — a filterable
@@ -411,6 +418,7 @@ Environment variables (all optional unless noted):
 | `WRONGFORGE_WEBHOOK_SECRET` / `_WEBHOOK_MAX_ATTEMPTS` | Webhook HMAC key (default: API key) / attempts (6) |
 | `WRONGFORGE_CACHE` | Default cache mode `5m\|1h\|off` (1h) |
 | `WRONGFORGE_EFFORT` | Default reasoning effort `low\|medium\|high\|off` (high), clamped to model support |
+| `WRONGFORGE_LIVE` | Serve-console live view: every HTTP request and task event as a colored line on stdout. Auto in a terminal, `1` forces on (pipes/logs), `0` off |
 | `WRONGFORGE_CONTEXT_WINDOW`, `_COMPACT_AT`, `_CLEAR_AT`, `_COMPACT_KEEP_TURNS`, `_KEEP_TOOL_RESULTS`, `_SUMMARY_MODEL` | Context management (see above) |
 | `WRONGFORGE_PROMPT_DIR` | Guide directory (default `<repo>/prompts`) |
 | `WRONGFORGE_MCP_CONFIG`, `_MCP_IDLE_MS`, `_MCP_TOOLS_TTL_MS`, `_MCP_AGENT_MANAGE` | MCP config path, pool idle time, tool-list TTL, allow the agent to add/remove servers (1) |

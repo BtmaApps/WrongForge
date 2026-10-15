@@ -41,6 +41,7 @@ import { configHelp, configFilePath, loadOAuthConfig } from "../src/config.js";
 import { dataDir } from "../src/paths.js";
 import { renderBanner, printBanner } from "../src/banner.js";
 import { toApiInputSchema } from "../src/tools/util.js";
+import { startLiveView } from "../src/liveview.js";
 import { buildTaskPreamble, buildTaskSystemPrompt, loadPromptFiles, promptDir } from "../src/prompt.js";
 import { fetchPlanUsage, untilLabel, usageLine } from "../src/usage.js";
 import { retentionFromEnv, runMaintenance, startMaintenance } from "../src/maintenance.js";
@@ -447,6 +448,42 @@ async function main(): Promise<void> {
 
     // garbage never throws
     assert(toApiInputSchema(null).type === "object" && toApiInputSchema("nope").type === "object" && toApiInputSchema({}).type === "object", "garbage input never throws");
+  }
+
+  // =================================================== liveview (serve console)
+  {
+    const lines: string[] = [];
+    let push: ((ev: Record<string, unknown>) => void) | null = null;
+    const events = {
+      subscribe: (fn: (ev: never) => void): (() => void) => {
+        push = fn as typeof push;
+        return () => {
+          push = null;
+        };
+      },
+    };
+    const taps = new Set<(e: Record<string, unknown>) => void>();
+    const stop = startLiveView({ events, httpTaps: taps as never }, { force: true, write: (l) => lines.push(l) });
+
+    const ev = (type: string, data: Record<string, unknown>): void =>
+      push?.({ type, ts: new Date().toISOString(), task_id: "tsk_test1", session_id: "ses_1", seq: 1, data });
+    for (const t of taps) t({ type: "http.request", ts: new Date().toISOString(), method: "GET", path: "/v1/tasks", status: 200, duration_ms: 3 });
+    ev("task.started", { model: "claude-sonnet-5-5", effort: "high", workdir: "D:/w" });
+    ev("step.request", { step: 1, model: "claude-sonnet-5-5", messages: 3, tools: 24, max_tokens: 32000, effort: "high" });
+    ev("tool.started", { name: "ls", input: { path: "." } });
+    ev("task.heartbeat", { elapsed_ms: 1000 });
+    stop();
+    // after stop nothing is written anymore
+    for (const t of taps) t({ type: "http.request", ts: new Date().toISOString(), method: "GET", path: "/v1/info", status: 200, duration_ms: 1 });
+
+    const all = lines.join("\n");
+    assert(all.includes("GET") && all.includes("/v1/tasks") && all.includes("200"), "liveview: http line");
+    assert(all.includes("task.started") && all.includes("claude-sonnet-5-5"), "liveview: task.started line");
+    assert(all.includes("step.request") && all.includes("msgs 3") && all.includes("effort high"), "liveview: step.request line");
+    assert(all.includes("ls") && all.includes("path"), "liveview: tool line");
+    assert(!all.includes("heartbeat"), "liveview: heartbeats are skipped");
+    assert(!all.includes("/v1/info"), "liveview: stop() unsubscribes");
+    assert(lines.filter(Boolean).length === 4, "liveview: one compact line per event");
   }
 
   console.log("UNIT CORE TESTS PASSED ✓ (compaction, cache, effort, messages, tool, config, paths, banner, prompt, usage, maintenance)");

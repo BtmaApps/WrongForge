@@ -8,3 +8,4 @@ re/
 .dfmt/
 .claude/
 coverage/
+.playwright-mcp/

@@ -14,8 +14,10 @@ import { GraphView } from "./components/GraphView.js";
 
 export default function App() {
   const conn = useStore((s) => s.conn);
+  const connDetail = useStore((s) => s.connDetail);
   const authError = useStore((s) => s.authError);
   const [openTaskId, setOpenTaskId] = useState<string | null>(null);
+  const [forceGate, setForceGate] = useState(false);
   const locked = conn === "locked";
 
   useEffect(() => {
@@ -24,12 +26,27 @@ export default function App() {
     return () => store.disconnectSse();
   }, []);
 
+  useEffect(() => {
+    if (conn === "open") setForceGate(false);
+  }, [conn]);
+
   const openTask = (id: string): void => setOpenTaskId(id);
 
   return (
     <Tooltip.Provider delayDuration={250}>
       <div className="app">
         <TopBar />
+        {conn === "reconnecting" && connDetail && (
+          <div className="conn-banner">
+            <span>
+              live feed lost — {connDetail} — retrying in the background
+              {connDetail.includes("401") ? " (the key looks wrong: the server may have generated a new one)" : ""}
+            </span>
+            <button className="banner-btn" onClick={() => setForceGate(true)}>
+              change key
+            </button>
+          </div>
+        )}
         {!locked && (
           <Tabs.Root defaultValue="feed" className="tabs">
             <Tabs.List className="tabs-list">
@@ -66,7 +83,7 @@ export default function App() {
             {authError && <div className="key-error">{authError}</div>}
           </div>
         )}
-        <KeyGate open={locked} hint={authError} />
+        <KeyGate open={locked || forceGate} hint={authError} onDismiss={() => setForceGate(false)} />
       </div>
     </Tooltip.Provider>
   );

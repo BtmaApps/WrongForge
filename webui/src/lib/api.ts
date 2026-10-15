@@ -61,16 +61,17 @@ export type SseStatus = "connecting" | "open" | "reconnecting";
 export function connectEvents(
   key: string,
   onEvent: (ev: TaskEvent) => void,
-  onStatus: (s: SseStatus) => void,
+  onStatus: (s: SseStatus, detail?: string) => void,
 ): () => void {
   let stopped = false;
   let retry = 0;
+  let lastError = "";
   const ctrl = new AbortController();
 
   const loop = async (): Promise<void> => {
     while (!stopped) {
       try {
-        onStatus(retry === 0 ? "connecting" : "reconnecting");
+        onStatus(retry === 0 ? "connecting" : "reconnecting", lastError || undefined);
         const res = await fetch(`/v1/events?key=${encodeURIComponent(key)}`, {
           headers: { Accept: "text/event-stream" },
           signal: ctrl.signal,
@@ -104,12 +105,13 @@ export function connectEvents(
             }
           }
         }
-      } catch {
-        /* aborted or the connection dropped — fall through to the backoff */
+      } catch (e) {
+        if (stopped) return;
+        lastError = (e as Error).message || "connection failed";
       }
       if (stopped) return;
       retry++;
-      onStatus("reconnecting");
+      onStatus("reconnecting", lastError || undefined);
       await new Promise((r) => setTimeout(r, Math.min(500 * 2 ** Math.min(retry, 5), 10_000)));
     }
   };

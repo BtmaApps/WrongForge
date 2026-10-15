@@ -37,6 +37,7 @@ import { runMaintenance, startMaintenance } from "./maintenance.js";
 import { McpConfigError } from "./mcp/config.js";
 import { McpError } from "./mcp/registry.js";
 import { SessionStore } from "./sessions.js";
+import { startLiveView } from "./liveview.js";
 
 const MAX_BODY = 1_000_000;
 const TERMINAL_EVENTS = new Set(["task.completed", "task.failed", "task.cancelled", "task.timed_out"]);
@@ -123,6 +124,9 @@ export function createAgentServer(opts: ServerOptions): http.Server {
 
   /** Subscribers of the live HTTP-traffic view (the global SSE feed). */
   const httpTaps = new Set<(e: HttpTapEvent) => void>();
+  // serve-console live view (TTY-gated, see liveview.ts): every request and
+  // event as one line on stdout, right where `npm run serve` runs
+  startLiveView({ events: manager, httpTaps });
 
   /**
    * Serves the built dashboard (public shell — the data still needs the API

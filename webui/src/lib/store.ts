@@ -41,6 +41,8 @@ export type ConnectionState = "locked" | SseStatus;
 export interface State {
   key: string;
   conn: ConnectionState;
+  /** Why the live feed is down (last SSE error), shown in the banner. */
+  connDetail: string | null;
   info: Info | null;
   usage: PlanUsage | null;
   tasks: Map<string, TaskRecord>;
@@ -57,6 +59,7 @@ export interface State {
 const initial: State = {
   key: "",
   conn: "locked",
+  connDetail: null,
   info: null,
   usage: null,
   tasks: new Map(),
@@ -119,8 +122,8 @@ class Store {
         if (ev.type === "http.request") this.applyHttp(ev as unknown as Parameters<Store["applyHttp"]>[0]);
         else this.applyEvent(ev);
       },
-      (s) => {
-        this.set(() => ({ conn: s }));
+      (s, detail) => {
+        this.set(() => ({ conn: s, connDetail: s === "open" ? null : (detail ?? this.state.connDetail) }));
         if (s === "open") void this.refresh(); // live-only feed: catch up after a gap
       },
     );

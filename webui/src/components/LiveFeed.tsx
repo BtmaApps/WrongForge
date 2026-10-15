@@ -36,15 +36,21 @@ const TYPE_TONE: Record<string, string> = {
 
 function summarize(type: string, data: Record<string, unknown>): string {
   const u = data.usage as { input_tokens?: number; output_tokens?: number } | undefined;
+  const result = data.result as
+    | { steps?: number; tool_calls?: number; text?: string; usage?: { input_tokens?: number; output_tokens?: number } }
+    | undefined;
+  const err = data.error as { code?: string; message?: string } | string | undefined;
   switch (type) {
     case "http.request":
       return `${data.method} ${data.path} → ${data.status} · ${data.duration_ms}ms`;
     case "task.started":
       return `model=${data.model} workdir=${data.workdir} effort=${data.effort ?? "?"}`;
     case "task.completed":
-      return `steps=${data.steps} tool_calls=${data.tool_calls} ${String(data.result_text ?? "").slice(0, 80)}`;
+      return `steps=${result?.steps ?? "?"} tools=${result?.tool_calls ?? "?"} · ↑${result?.usage?.input_tokens ?? "?"} ↓${result?.usage?.output_tokens ?? "?"} · ${String(result?.text ?? "").slice(0, 70)}`;
     case "task.failed":
-      return `${String(data.code ?? "")} ${String(data.error ?? "")}`.trim();
+      return typeof err === "string"
+        ? err.slice(0, 120)
+        : `${err?.code ?? ""} ${err?.message ?? ""}`.trim().slice(0, 120);
     case "step.request":
       return `→ model=${data.model} effort=${data.effort ?? "—"} msgs=${data.messages} tools=${data.tools} max=${data.max_tokens}`;
     case "step.finished":

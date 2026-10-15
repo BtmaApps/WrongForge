@@ -4,7 +4,7 @@ import { useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import { store } from "../lib/store.js";
 
-export function KeyGate({ open, hint }: { open: boolean; hint?: string | null }) {
+export function KeyGate({ open, hint, onDismiss }: { open: boolean; hint?: string | null; onDismiss?: () => void }) {
   const [key, setKey] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -18,7 +18,7 @@ export function KeyGate({ open, hint }: { open: boolean; hint?: string | null })
   };
 
   return (
-    <Dialog.Root open={open}>
+    <Dialog.Root open={open} onOpenChange={(o) => !o && onDismiss?.()}>
       <Dialog.Portal>
         <Dialog.Overlay className="dialog-overlay" />
         <Dialog.Content className="dialog-content dialog-key" onOpenAutoFocus={(e) => e.preventDefault()}>
