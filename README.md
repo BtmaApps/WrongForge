@@ -22,6 +22,10 @@ runtime services are needed.
 - [Architecture](#architecture) · [Configuration](#configuration) · [Data directory](#data-directory)
 - [Tests](#tests) · [Security notes](#security-notes) · [Known limitations](#known-limitations)
 
+**Documentation:** [docs/TASKS-API.md](docs/TASKS-API.md) (protocol reference) ·
+[docs/INTEGRATION.md](docs/INTEGRATION.md) (client guide) ·
+[docs/TOOL-GATEWAY.md](docs/TOOL-GATEWAY.md) · [docs/MCP.md](docs/MCP.md)
+
 ## Models
 
 | Model ID | Tier | Price in/out ($/MTok) |
@@ -189,6 +193,9 @@ npm run mcp -- import ~/.claude.json      # Claude Code / Desktop style { "mcpSe
   `POST /v1/mcp/servers/:name/{test,enable,disable}`,
   `GET /v1/mcp/servers/:name/tools`, `POST /v1/mcp/import`.
 
+Details (all options, secrets, results, failure handling, security):
+**[docs/MCP.md](docs/MCP.md)**.
+
 ## Tool gateway
 
 An orchestrator can lend the agent its own tools over HTTP. A task's `gateway`
@@ -198,8 +205,8 @@ each call is `POST`ed back to `{url}{call_path}`. Tools appear to the model as
 `<name_prefix><name>` (default `wstack_`), sorted so the tool list — part of the
 prompt-cache prefix — stays byte-stable. Tokens and custom headers are kept in
 memory only. Non-loopback gateway hosts must be listed in
-`WRONGFORGE_GATEWAY_ALLOWED_HOSTS`. Implementation and contract comments:
-`src/tools/gateway.ts`.
+`WRONGFORGE_GATEWAY_ALLOWED_HOSTS`. Full contract:
+**[docs/TOOL-GATEWAY.md](docs/TOOL-GATEWAY.md)** (code: `src/tools/gateway.ts`).
 
 ## HTTP task API
 
@@ -272,9 +279,9 @@ runs one task at a time.
 > *starts*; it does not confine it (use `WRONGFORGE_ALLOWED_ROOTS` to restrict
 > where tasks may start, and a container/VM for untrusted prompts).
 
-> **Docs status:** `docs/API.md` still documents the earlier synchronous
-> `POST /v1/run` endpoint, which no longer exists. The source of truth for the
-> task protocol is `src/server.ts`, `src/tasks/types.ts` and this README.
+Full reference: **[docs/TASKS-API.md](docs/TASKS-API.md)** (protocol) and
+**[docs/INTEGRATION.md](docs/INTEGRATION.md)** (building a client: patterns,
+examples, troubleshooting). Index: [docs/API.md](docs/API.md).
 
 ## Sessions & context management
 
@@ -421,9 +428,6 @@ No test talks to Anthropic.
   stop working without notice — see the privacy section; use `ANTHROPIC_API_KEY`
   for a supported path.
 - No sandbox, no per-command approval; tool calls within a step run sequentially.
-- `docs/API.md` and `test/server.test.ts` are outdated (see above); several
-  source comments reference `docs/TASKS-API.md`, `docs/TOOL-GATEWAY.md`,
-  `docs/MCP.md` and `docs/INTEGRATION.md`, which do not exist yet — this README
-  is the current reference.
+- `test/server.test.ts` is outdated (see Tests).
 - `src/app.ts` and `src/maintenance.ts` mention `npm run maintain`; that script is
   not defined in `package.json` (use `POST /v1/maintenance/run` or run the server).
