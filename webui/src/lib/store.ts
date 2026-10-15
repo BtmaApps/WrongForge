@@ -67,6 +67,8 @@ export interface State {
   /** edge-id / node-id -> last-activity ts, drives the graph animations. */
   pulses: Map<string, number>;
   authError: string | null;
+  /** Last action failure (test task/cancel), shown as a toast; null = none. */
+  actionError: string | null;
 }
 
 const initial: State = {
@@ -85,6 +87,7 @@ const initial: State = {
   lastActivityAt: 0,
   pulses: new Map(),
   authError: null,
+  actionError: null,
 };
 
 type Listener = () => void;
@@ -221,6 +224,68 @@ class Store {
       this.set(() => ({ usage }));
     } catch {
       this.set(() => ({ usage: null }));
+    }
+  }
+
+  // ------------------------------------------------------------- actions
+
+  private toast(message: string): void {
+    this.set(() => ({ actionError: message }));
+    setTimeout(() => {
+      if (this.state.actionError === message) this.set(() => ({ actionError: null }));
+    }, 8_000);
+  }
+
+  dismissToast(): void {
+    this.set(() => ({ actionError: null }));
+  }
+
+  /** One harmless GET so the user sees an http row land instantly. */
+  async fireTestRequest(): Promise<void> {
+    try {
+      await api("/v1/tools", this.state.key);
+    } catch (e) {
+      this.toast((e as Error).message);
+    }
+  }
+
+  /**
+   * The "run a test task" button: a tiny real task (one ls + a fixed final
+   * text, max 5 steps) so the whole pipeline — Claude round-trips, tool
+   * calls, tokens — flows into the dashboard on demand.
+   */
+  async submitDemoTask(): Promise<void> {
+    const key = this.state.key;
+    if (!key) return;
+    const workdir = this.state.info?.workdir;
+    const dir = workdir?.default ?? workdir?.suggestion ?? null;
+    if (!dir) {
+      this.toast("no usable workdir: set a default workdir on the server (or its allowed_roots must include a temp path)");
+      return;
+    }
+    try {
+      await api<{ task: { id: string } }>("/v1/tasks", key, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          task_id: `demo-${new Date().toISOString().slice(11, 19).replace(/:/g, "")}`,
+          workdir: dir,
+          max_steps: 5,
+          prompt: '[[tool ls {"path":"."}]] [[say dashboard test ok]]',
+        }),
+      });
+      await this.refresh(); // pick the new task document up immediately
+    } catch (e) {
+      this.toast((e as Error).message);
+    }
+  }
+
+  /** Cancel a queued/running task; the task.cancelled event updates the UI. */
+  async cancelTask(taskId: string): Promise<void> {
+    try {
+      await api(`/v1/tasks/${encodeURIComponent(taskId)}/cancel`, this.state.key, { method: "POST", body: "{}" });
+    } catch (e) {
+      this.toast((e as Error).message);
     }
   }
 

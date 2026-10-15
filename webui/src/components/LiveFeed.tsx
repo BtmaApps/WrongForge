@@ -6,7 +6,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as ToggleGroup from "@radix-ui/react-toggle-group";
 import * as Switch from "@radix-ui/react-switch";
-import { useStore } from "../lib/store.js";
+import { store, useStore } from "../lib/store.js";
 import { JsonPeek } from "./bits.js";
 import { shortId } from "../lib/types.js";
 
@@ -94,10 +94,31 @@ function HttpRow({ data, ts }: { data: Record<string, unknown>; ts: string }) {
 
 export function LiveFeed({ onOpenTask }: { onOpenTask: (id: string) => void }) {
   const feed = useStore((s) => s.feed);
+  const lastActivityAt = useStore((s) => s.lastActivityAt);
   const [filter, setFilter] = useState("all");
   const [showHeartbeats, setShowHeartbeats] = useState(false);
   const [follow, setFollow] = useState(true);
+  const [busy, setBusy] = useState<string | null>(null);
   const boxRef = useRef<HTMLDivElement>(null);
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1_000);
+    return () => clearInterval(t);
+  }, []);
+
+  const run = (what: "req" | "task"): void => {
+    setBusy(what);
+    void (what === "req" ? store.fireTestRequest() : store.submitDemoTask()).finally(() => setBusy(null));
+  };
+
+  /**
+   * The "why is it quiet" strip: no task has ever run on this page and the
+   * server has been silent for a minute — so every row above is the
+   * dashboard's own refresh traffic. Says so, and offers the test actions.
+   */
+  const idleSec = lastActivityAt ? Math.round((now - lastActivityAt) / 1000) : null;
+  const noRealWork = feed.every((r) => r.ev.task_id === "—");
+  const showIdleStrip = idleSec !== null && idleSec > 60 && noRealWork;
 
   const rows = useMemo(
     () =>
@@ -159,12 +180,67 @@ export function LiveFeed({ onOpenTask }: { onOpenTask: (id: string) => void }) {
           </Switch.Root>
           follow
         </label>
+        <button
+          className="btn btn-ghost"
+          onClick={() => run("req")}
+          disabled={busy !== null}
+          title="one harmless GET /v1/tools — watch it land as an http row"
+        >
+          ⚡ test request
+        </button>
+        <button
+          className="btn"
+          onClick={() => run("task")}
+          disabled={busy !== null}
+          title="submit a tiny real task (one ls, max 5 steps) — watch the full pipeline: Claude round-trips, tool calls, tokens"
+        >
+          ▶ run test task
+        </button>
         <span className="feed-count">
           {rows.length}/{feed.length} events
         </span>
       </div>
       <div className="feed-scroll" ref={boxRef}>
-        {rows.length === 0 && <div className="empty">waiting for events — submit a task and watch it flow…</div>}
+        {showIdleStrip && (
+          <div className="idle-strip">
+            <span>
+              quiet for {idleSec}s — no client has sent anything real to <span className="mono">{location.origin}</span>;
+              the rows here are this dashboard's own refreshes. WrongStack isn't submitting.
+            </span>
+            <span className="idle-actions">
+              <button className="btn btn-ghost" onClick={() => run("req")} disabled={busy !== null}>
+                ⚡ test request
+              </button>
+              <button className="btn" onClick={() => run("task")} disabled={busy !== null}>
+                ▶ run test task
+              </button>
+            </span>
+          </div>
+        )}
+        {feed.length === 0 && (
+          <div className="empty-panel">
+            <div className="empty-title">nothing has reached this server yet</div>
+            <p>
+              This dashboard is a live window onto <span className="mono">this</span> WrongForge API: every HTTP request it
+              receives, every task it runs — Claude round-trips, tool calls, gateway tools — flows here the moment it
+              happens. An empty feed means exactly that: <b>no client has sent anything</b>.
+            </p>
+            <p>Make something happen right now:</p>
+            <div className="empty-actions">
+              <button className="btn btn-ghost" onClick={() => run("req")} disabled={busy !== null}>
+                ⚡ test request (free, instant)
+              </button>
+              <button className="btn" onClick={() => run("task")} disabled={busy !== null}>
+                ▶ run a test task (tiny, ~2 steps)
+              </button>
+            </div>
+            <p className="dim">
+              Real traffic comes from your orchestrator — check that WrongStack is running and pointed at{" "}
+              <span className="mono">{location.origin}</span>.
+            </p>
+          </div>
+        )}
+        {feed.length > 0 && rows.length === 0 && <div className="empty">no events match this filter</div>}
         {rows.map((r) =>
           r.ev.type === "http.request" ? (
             <div key={r.key} className={`feed-row ev-http ${httpStatusClass(Number(r.ev.data.status ?? 0))}`}>

@@ -102,7 +102,7 @@ export interface Info {
   default_model: string;
   models: string[];
   queue: { queued: number; running: number; max_concurrency: number } & Record<string, number>;
-  workdir: { default: string | null; required: boolean; allowed_roots?: string[]; lock_by_default: boolean };
+  workdir: { default: string | null; required: boolean; allowed_roots?: string[]; lock_by_default: boolean; suggestion?: string | null };
   context: { window: number; compact_at: number; clear_at: number; keep_turns: number };
   cache: { default: string; modes: string[] };
   effort: { default: string; levels: string[] };

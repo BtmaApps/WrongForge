@@ -280,6 +280,258 @@ body {
   flex-direction: column;
 }
 
+/* ------------------------------------------------------- overview control room
+ * One screen, three panes: tasks | live feed | inspector. Each pane scrolls
+ * on its own; the screen itself never scrolls. */
+
+.overview {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: clamp(230px, 20vw, 300px) minmax(0, 1fr) clamp(300px, 28vw, 440px);
+}
+
+.rail,
+.inspector {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  background: var(--bg);
+}
+
+.rail {
+  border-right: 1px solid var(--line);
+}
+
+.inspector {
+  border-left: 1px solid var(--line);
+}
+
+.rail-head,
+.insp-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-1);
+  flex: none;
+  min-width: 0;
+}
+
+.rail-title,
+.insp-title {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rail-scroll,
+.inspector-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.rail-row {
+  padding: 7px 12px;
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 55%, transparent);
+  cursor: pointer;
+}
+
+.rail-row:hover {
+  background: var(--bg-1);
+}
+
+.rail-row.selected {
+  background: var(--bg-2);
+  box-shadow: inset 2px 0 0 var(--blue);
+}
+
+.rail-row-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.rail-id {
+  font-size: 11px;
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rail-age {
+  margin-left: auto;
+  font-size: 10.5px;
+  flex: none;
+}
+
+.rail-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--fg-faint);
+}
+
+.rail-dot.pulse {
+  animation: pulse 1.6s ease-in-out infinite;
+}
+
+.rd-queued { background: var(--amber); }
+.rd-running { background: var(--green); }
+.rd-completed { background: var(--blue); }
+.rd-failed { background: var(--red); }
+.rd-cancelled { background: var(--fg-faint); }
+.rd-timed_out { background: var(--orange); }
+
+.rail-prompt {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--fg-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rail-sub {
+  display: flex;
+  gap: 10px;
+  margin-top: 2px;
+  font-size: 10.5px;
+}
+
+.rail-now {
+  color: var(--green);
+}
+
+.rail-report {
+  color: var(--violet);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.seg-mini {
+  display: inline-flex;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.seg-mini .seg-item {
+  appearance: none;
+  background: none;
+  border: none;
+  color: var(--fg-faint);
+  font-family: var(--mono);
+  font-size: 10px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+
+.seg-mini .seg-item.on {
+  background: var(--bg-3);
+  color: var(--blue);
+}
+
+.inspector-scroll {
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.insp-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.insp-usage {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.insp-usage-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 11.5px;
+  color: var(--fg-dim);
+}
+
+.insp-usage-row .bar {
+  flex: 1;
+}
+
+.insp-sub {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--fg-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-top: 2px;
+}
+
+.insp-tools {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+
+.insp-tools td {
+  padding: 2.5px 8px 2.5px 0;
+  color: var(--fg-dim);
+  white-space: nowrap;
+}
+
+.insp-tools .tool-td-name {
+  color: var(--fg);
+}
+
+.tone-red-text {
+  color: var(--red);
+}
+
+.insp-hint {
+  font-size: 11px;
+  margin-top: auto;
+  padding-top: 12px;
+  text-align: center;
+}
+
+/* narrow screens: stack the panes instead of crushing them */
+@media (max-width: 1000px) {
+  .overview {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(180px, auto) minmax(240px, 1fr) minmax(220px, auto);
+    overflow-y: auto;
+  }
+
+  .rail {
+    border-right: none;
+    border-bottom: 1px solid var(--line);
+    max-height: 260px;
+  }
+
+  .inspector {
+    border-left: none;
+    border-top: 1px solid var(--line);
+    max-height: 60vh;
+  }
+}
+
 /* -------------------------------------------------------------------- feed */
 
 .feed,
@@ -550,6 +802,126 @@ body {
 .banner-btn:hover {
   background: color-mix(in srgb, var(--amber) 15%, transparent);
 }
+
+/* ---------------------------------------------------------------- actions */
+
+.btn {
+  appearance: none;
+  border: 1px solid color-mix(in srgb, var(--cyan) 55%, transparent);
+  background: color-mix(in srgb, var(--cyan) 14%, var(--bg-2));
+  color: var(--cyan);
+  border-radius: 6px;
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 3px 10px;
+  cursor: pointer;
+  transition: background 0.15s ease, transform 0.05s ease;
+}
+
+.btn:hover { background: color-mix(in srgb, var(--cyan) 24%, var(--bg-2)); }
+.btn:active { transform: translateY(1px); }
+.btn:disabled { opacity: 0.45; cursor: default; }
+
+.btn-ghost {
+  border-color: var(--line);
+  background: var(--bg-2);
+  color: var(--fg-dim);
+}
+
+.btn-ghost:hover { background: var(--bg-3); color: var(--fg); }
+
+/* the feed's empty state explains WHY it is empty and offers live actions */
+.empty-panel {
+  margin: 28px auto;
+  max-width: 560px;
+  padding: 20px 24px;
+  border: 1px dashed var(--line);
+  border-radius: 10px;
+  background: var(--bg-1);
+  color: var(--fg-dim);
+  font-size: 12.5px;
+  line-height: 1.65;
+  text-align: left;
+}
+
+.empty-title {
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 13px;
+  margin-bottom: 8px;
+}
+
+.empty-panel p { margin: 8px 0; }
+.empty-panel b { color: var(--fg); }
+.empty-actions {
+  display: flex;
+  gap: 8px;
+  margin: 10px 0;
+  flex-wrap: wrap;
+}
+
+/* shown while the server is provably quiet: explains the dashboard-only rows */
+.idle-strip {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin: 8px 16px;
+  padding: 8px 12px;
+  border: 1px dashed color-mix(in srgb, var(--amber) 45%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--amber) 8%, var(--bg-1));
+  color: var(--fg-dim);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.idle-actions {
+  display: inline-flex;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.toast {
+  position: fixed;
+  bottom: 18px;
+  right: 18px;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  max-width: 46vw;
+  padding: 9px 14px;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--red) 55%, transparent);
+  background: color-mix(in srgb, var(--red) 16%, var(--bg-2));
+  color: var(--red);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  animation: toast-in 0.25s ease-out;
+}
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+
+.cancel-btn {
+  appearance: none;
+  background: none;
+  border: 1px solid color-mix(in srgb, var(--red) 45%, transparent);
+  color: var(--red);
+  border-radius: 5px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  padding: 1px 8px;
+  cursor: pointer;
+}
+
+.cancel-btn:hover { background: color-mix(in srgb, var(--red) 15%, transparent); }
+
+.row-actions { white-space: nowrap; }
+
 
 .locked-note {
   padding: 60px;

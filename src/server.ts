@@ -20,6 +20,7 @@
 import * as http from "node:http";
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ClaudeOAuth } from "./oauth.js";
@@ -253,6 +254,24 @@ export function createAgentServer(opts: ServerOptions): http.Server {
   };
   const flag = (url: URL, name: string): boolean => /^(1|true|yes)$/i.test(url.searchParams.get(name) ?? "");
 
+  /**
+   * A workdir the dashboard's "run a test task" button can submit against:
+   * the configured default when there is one, otherwise a directory under the
+   * OS temp dir (created here so submit validation passes). Null when neither
+   * is usable (e.g. restricted allowed_roots) — the dashboard then shows the
+   * submit error instead of guessing a path.
+   */
+  const workdirSuggestion = (): string | null => {
+    if (app.defaultWorkdir) return app.defaultWorkdir;
+    const dir = path.join(os.tmpdir(), "wrongforge-demo");
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      return dir;
+    } catch {
+      return null;
+    }
+  };
+
   // ------------------------------------------------------------------ SSE
 
   const sseStart = (res: http.ServerResponse): void => {
@@ -440,6 +459,7 @@ export function createAgentServer(opts: ServerOptions): http.Server {
         required: !app.defaultWorkdir,
         allowed_roots: app.allowedRoots,
         lock_by_default: app.defaultWorkdirLock,
+        suggestion: workdirSuggestion(),
       },
       context: { window: ctx.window, compact_at: ctx.compactAt, clear_at: ctx.clearAt, keep_turns: ctx.keepTurns },
       cache: { default: process.env.WRONGFORGE_CACHE || "1h", modes: ["5m", "1h", "off"] },

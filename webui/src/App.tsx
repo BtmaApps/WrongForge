@@ -1,4 +1,8 @@
-/** Shell: key gate → top bar + tabbed views. Everything below is live. */
+/** Shell: key gate → status bar + one-screen control room.
+ *
+ * Overview = task rail | live feed | inspector (selected task, or the system
+ * panel when nothing is selected). Graph and Sessions stay as secondary tabs.
+ */
 
 import { useEffect, useState } from "react";
 import * as Tabs from "@radix-ui/react-tabs";
@@ -8,7 +12,8 @@ import { store, useStore } from "./lib/store.js";
 import { KeyGate } from "./components/KeyGate.js";
 import { TopBar } from "./components/TopBar.js";
 import { LiveFeed } from "./components/LiveFeed.js";
-import { TasksView } from "./components/TasksView.js";
+import { TaskRail } from "./components/TaskRail.js";
+import { Inspector } from "./components/Inspector.js";
 import { SessionsView } from "./components/SessionsView.js";
 import { GraphView } from "./components/GraphView.js";
 
@@ -16,7 +21,9 @@ export default function App() {
   const conn = useStore((s) => s.conn);
   const connDetail = useStore((s) => s.connDetail);
   const authError = useStore((s) => s.authError);
+  const actionError = useStore((s) => s.actionError);
   const [openTaskId, setOpenTaskId] = useState<string | null>(null);
+  const [tab, setTab] = useState("overview");
   const [forceGate, setForceGate] = useState(false);
   const locked = conn === "locked";
 
@@ -30,7 +37,12 @@ export default function App() {
     if (conn === "open") setForceGate(false);
   }, [conn]);
 
-  const openTask = (id: string): void => setOpenTaskId(id);
+  // a task picked anywhere (feed row, rail, graph node) selects it and jumps
+  // to the overview so the inspector is visible
+  const pickTask = (id: string): void => {
+    setOpenTaskId(id);
+    setTab("overview");
+  };
 
   return (
     <Tooltip.Provider delayDuration={250}>
@@ -48,29 +60,27 @@ export default function App() {
           </div>
         )}
         {!locked && (
-          <Tabs.Root defaultValue="feed" className="tabs">
+          <Tabs.Root value={tab} onValueChange={setTab} className="tabs">
             <Tabs.List className="tabs-list">
-              <Tabs.Trigger value="feed" className="tabs-trigger">
-                Live feed
+              <Tabs.Trigger value="overview" className="tabs-trigger">
+                Overview
               </Tabs.Trigger>
               <Tabs.Trigger value="graph" className="tabs-trigger">
                 Graph
-              </Tabs.Trigger>
-              <Tabs.Trigger value="tasks" className="tabs-trigger">
-                Tasks
               </Tabs.Trigger>
               <Tabs.Trigger value="sessions" className="tabs-trigger">
                 Sessions
               </Tabs.Trigger>
             </Tabs.List>
-            <Tabs.Content value="feed" className="tabs-content">
-              <LiveFeed onOpenTask={openTask} />
+            <Tabs.Content value="overview" className="tabs-content">
+              <div className="overview">
+                <TaskRail selectedId={openTaskId} onSelect={setOpenTaskId} />
+                <LiveFeed onOpenTask={pickTask} />
+                <Inspector taskId={openTaskId} onClose={() => setOpenTaskId(null)} />
+              </div>
             </Tabs.Content>
             <Tabs.Content value="graph" className="tabs-content tabs-graph">
-              <GraphView onOpenTask={openTask} />
-            </Tabs.Content>
-            <Tabs.Content value="tasks" className="tabs-content">
-              <TasksView openTaskId={openTaskId} setOpenTaskId={setOpenTaskId} />
+              <GraphView onOpenTask={pickTask} />
             </Tabs.Content>
             <Tabs.Content value="sessions" className="tabs-content">
               <SessionsView />
@@ -81,6 +91,14 @@ export default function App() {
           <div className="locked-note">
             The API on this origin requires a key.
             {authError && <div className="key-error">{authError}</div>}
+          </div>
+        )}
+        {actionError && (
+          <div className="toast" role="alert">
+            <span>⚠ {actionError}</span>
+            <button className="banner-btn" onClick={() => store.dismissToast()}>
+              ×
+            </button>
           </div>
         )}
         <KeyGate open={locked || forceGate} hint={authError} onDismiss={() => setForceGate(false)} />

@@ -50,8 +50,9 @@ export function TopBar() {
 
       {info && (
         <div className="topbar-chips">
-          <Chip label="model" value={info.default_model} />
-          <Chip label="effort" value={info.effort.default} tone="tone-cyan" />
+          <Tip text={`effort ${info.effort.default} · tools ${info.tools.length} · ${info.mcp.servers} MCP servers`}>
+            <Chip label="model" value={info.default_model} />
+          </Tip>
           <Chip label="queue" value={`${info.queue.running}/${info.queue.max_concurrency} · ${info.queue.queued} queued`} />
           <Chip label="requests" value={String(totals.requests)} tone="tone-cyan" />
           <Chip
@@ -61,7 +62,6 @@ export function TopBar() {
           />
           <Chip label="tokens" value={`↑${fmtTokens(totals.in)} ↓${fmtTokens(totals.out)}`} tone="tone-violet" />
           <Chip label="cache read" value={fmtTokens(totals.cacheRead)} tone="tone-green" />
-          <Chip label="tool calls" value={String(totals.toolCalls)} />
         </div>
       )}
 
