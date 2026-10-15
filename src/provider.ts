@@ -22,6 +22,8 @@ import type { AnthropicProvider } from "@ai-sdk/anthropic";
 import * as crypto from "node:crypto";
 import type { ClaudeOAuth } from "./oauth.js";
 import { PROTOCOL } from "./oauth.js";
+import { applyCacheBreakpoints, defaultCacheMode, type CacheMode } from "./cache.js";
+import { currentContext } from "./context.js";
 
 /**
  * Mimics the Claude Code CLI client signature. Captured verbatim from a real
@@ -63,6 +65,18 @@ const CLAUDE_CODE_BETAS = [
 const CLAUDE_CODE_SYSTEM_MARKER =
   "You are Claude Code, Anthropic's official CLI for Claude.";
 
+/**
+ * Set when the API rejected cache_control once: caching is then switched off
+ * for the rest of the process so a cache problem can never fail tasks.
+ */
+let cacheRejected = false;
+
+/** Cache mode for the request being built: task override > env default; "off" after a rejection. */
+function effectiveCacheMode(): CacheMode {
+  if (cacheRejected) return "off";
+  return currentContext()?.cache ?? defaultCacheMode();
+}
+
 function withClaudeCodeSystem(
   input: RequestInfo | URL,
   init: RequestInit | undefined,
@@ -90,6 +104,7 @@ function withClaudeCodeSystem(
     } else {
       body.system = [{ type: "text", text: CLAUDE_CODE_SYSTEM_MARKER }];
     }
+    applyCacheBreakpoints(body, effectiveCacheMode());
     return { input, init: { ...init, body: JSON.stringify(body) } };
   } catch {
     return { input, init };
@@ -133,6 +148,16 @@ export function oauthFetch(oauth: ClaudeOAuth): typeof globalThis.fetch {
     if (res.status === 401) {
       const fresh = await oauth.refresh();
       if (fresh) res = await doFetch();
+    }
+    // The API refused our cache_control markers (e.g. unsupported TTL on this
+    // account): retry once without them and stop sending them.
+    if (res.status === 400 && effectiveCacheMode() !== "off") {
+      const detail = await res.clone().text().catch(() => "");
+      if (/cache_control|cache control|ttl/i.test(detail)) {
+        cacheRejected = true;
+        console.error("[cache] the API rejected cache_control — prompt caching is disabled for this process:", detail.slice(0, 300));
+        res = await doFetch();
+      }
     }
     return res;
   };

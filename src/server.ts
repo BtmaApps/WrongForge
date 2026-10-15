@@ -19,7 +19,10 @@ import * as http from "node:http";
 import * as crypto from "node:crypto";
 import type { ModelMessage } from "ai";
 import { ClaudeOAuth } from "./oauth.js";
-import { APP_NAME } from "./paths.js";
+import { APP_NAME, VERSION, dataDir } from "./paths.js";
+import { resolveApiKey } from "./apikey.js";
+import { printBanner } from "./banner.js";
+import { loadPromptFiles } from "./prompt.js";
 import { createClaudeProvider } from "./provider.js";
 import { agentTools } from "./tools/index.js";
 import { runAgentTurn, DEFAULT_MODEL, type AgentEvent } from "./agent.js";
@@ -228,21 +231,36 @@ export function createAgentServer(opts: ServerOptions): http.Server {
 // ---- CLI entry ----
 const isMain = process.argv[1] && /server\.(ts|js)$/.test(process.argv[1]);
 if (isMain) {
-  const apiKey = process.env.AGENT_API_KEY;
-  if (!apiKey || apiKey.length < 16) {
-    console.error("Set AGENT_API_KEY (at least 16 characters) — the agent can execute shell commands.");
+  let resolved;
+  try {
+    resolved = resolveApiKey(); // env -> saved file -> generate + save
+  } catch (e) {
+    console.error((e as Error).message);
     process.exit(1);
   }
   const oauth = new ClaudeOAuth(process.env.CLAUDE_TOKEN_STORE || undefined);
-  if (!oauth.signedIn) console.error("warning: not signed in yet — /v1/run answers 503 until you run `npm run import`.");
   const host = process.env.HOST || "127.0.0.1";
   const port = Number(process.env.PORT || 8787);
-  const server = createAgentServer({
-    apiKey,
-    oauth,
-    defaultModel: process.env.CLAUDE_MODEL || DEFAULT_MODEL,
+  const model = process.env.CLAUDE_MODEL || DEFAULT_MODEL;
+  const server = createAgentServer({ apiKey: resolved.key, oauth, defaultModel: model });
+  server.on("error", (e: NodeJS.ErrnoException) => {
+    console.error(
+      e.code === "EADDRINUSE"
+        ? `Port ${port} is already in use — another WrongForge running? Set PORT to use a different one.`
+        : `Server error: ${e.message}`,
+    );
+    process.exit(1);
   });
   server.listen(port, host, () => {
-    console.log(`WrongForge API listening on http://${host}:${port}  (model: ${process.env.CLAUDE_MODEL || DEFAULT_MODEL})`);
+    printBanner({
+      version: VERSION,
+      host,
+      port,
+      key: resolved,
+      signedIn: oauth.signedIn,
+      model,
+      dataDir: dataDir(),
+      promptFiles: loadPromptFiles().map((f) => f.name),
+    });
   });
 }

@@ -44,15 +44,32 @@ Operating principles:
 6. Destructive or hard-to-reverse actions (deleting files, force-push, installs) require asking the user first.
 7. Answer in the user's language. Be concise; show command output only when it matters.`;
 
+export interface TokenUsage {
+  /** All input tokens (cache reads and writes included). */
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  /** Input tokens served from the prompt cache (cheap). */
+  cache_read_tokens: number;
+  /** Input tokens written to the prompt cache. */
+  cache_write_tokens: number;
+}
+
 export interface TurnResult {
   finishReason: string;
   toolCalls: number;
   /** Assistant text of this turn (all steps concatenated). */
   text: string;
+  /** Number of model steps (LLM round-trips) in this turn. */
+  steps: number;
+  /** Token usage summed over all steps. */
+  usage: TokenUsage;
 }
 
 /** Structured events emitted while a turn runs (used by the HTTP server). */
 export type AgentEvent =
+  | { type: "step_start"; step: number }
+  | { type: "step_finish"; step: number; finish_reason: string; usage: TokenUsage }
   | { type: "text"; delta: string }
   | { type: "tool_call"; id: string; name: string; input: unknown }
   | { type: "tool_result"; id: string; name: string; output: unknown }
@@ -71,10 +88,11 @@ export async function runAgentTurn(
   maxSteps = 20,
   abortSignal?: AbortSignal,
   onEvent?: (e: AgentEvent) => void,
+  system: string = SYSTEM_PROMPT,
 ): Promise<TurnResult> {
   const result = streamText({
     model: provider(modelId),
-    system: SYSTEM_PROMPT,
+    system,
     messages: history,
     tools: agentTools,
     stopWhen: stepCountIs(maxSteps),
@@ -83,8 +101,34 @@ export async function runAgentTurn(
 
   let toolCalls = 0;
   let text = "";
+  let steps = 0;
+  const usage: TokenUsage = {
+    input_tokens: 0, output_tokens: 0, total_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0,
+  };
   for await (const part of result.fullStream) {
     switch (part.type) {
+      case "start-step":
+        steps++;
+        if (onEvent) onEvent({ type: "step_start", step: steps });
+        break;
+      case "finish-step": {
+        const u: TokenUsage = {
+          input_tokens: part.usage.inputTokens ?? 0,
+          output_tokens: part.usage.outputTokens ?? 0,
+          total_tokens:
+            part.usage.totalTokens ??
+            (part.usage.inputTokens ?? 0) + (part.usage.outputTokens ?? 0),
+          cache_read_tokens: part.usage.inputTokenDetails?.cacheReadTokens ?? 0,
+          cache_write_tokens: part.usage.inputTokenDetails?.cacheWriteTokens ?? 0,
+        };
+        usage.input_tokens += u.input_tokens;
+        usage.output_tokens += u.output_tokens;
+        usage.total_tokens += u.total_tokens;
+        usage.cache_read_tokens += u.cache_read_tokens;
+        usage.cache_write_tokens += u.cache_write_tokens;
+        if (onEvent) onEvent({ type: "step_finish", step: steps, finish_reason: String(part.finishReason), usage: u });
+        break;
+      }
       case "text-delta":
         text += part.text;
         if (onEvent) onEvent({ type: "text", delta: part.text });
@@ -126,7 +170,7 @@ export async function runAgentTurn(
 
   // An interrupted turn may end mid tool-call; its partial messages would
   // leave a dangling tool_use in the history, so the caller rolls the turn back.
-  if (abortSignal?.aborted) return { finishReason: "aborted", toolCalls, text };
+  if (abortSignal?.aborted) return { finishReason: "aborted", toolCalls, text, steps, usage };
 
   // Append assistant + tool messages to the history (multi-step context).
   // ai@7: response.messages was removed → result.responseMessages
@@ -137,6 +181,8 @@ export async function runAgentTurn(
     finishReason: (await result.finishReason) ?? "unknown",
     toolCalls,
     text,
+    steps,
+    usage,
   };
 }
 

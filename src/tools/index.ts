@@ -13,6 +13,7 @@
  *   web_fetch   fetch a URL and return readable text
  *   todo_read   read the session task list
  *   todo_write  replace the session task list
+ *   report_progress  status update to the orchestrator (WrongStack) — task mode
  *
  * All local tools run on the user's machine in the working directory.
  * Nothing machine-specific is transmitted (see README privacy section).
@@ -32,6 +33,7 @@ import { grep } from "./grep.js";
 import { web_fetch } from "./web-fetch.js";
 import { todoRead } from "./todo-read.js";
 import { todoWrite } from "./todo-write.js";
+import { reportProgress } from "./report-progress.js";
 
 export const agentTools = {
   bash,
@@ -44,6 +46,7 @@ export const agentTools = {
   web_fetch,
   todo_read: todoRead,
   todo_write: todoWrite,
+  report_progress: reportProgress,
 };
 
 // helpers re-exported for tests and other modules

@@ -13,7 +13,7 @@
     "status": "tsx src/main.ts status",
     "url": "tsx src/main.ts url",
     "models": "tsx src/main.ts models",
-    "test": "tsx test/tools.test.ts && tsx test/oauth-mock.test.ts && tsx test/agent-e2e.test.ts && tsx test/server.test.ts",
+    "test": "tsx test/tools.test.ts && tsx test/oauth-mock.test.ts && tsx test/agent-e2e.test.ts && tsx test/server.test.ts && tsx test/log.test.ts && tsx test/apikey.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

@@ -1,0 +1,767 @@
+/**
+ * Task manager — runs tasks for the orchestrator and tells it everything.
+ *
+ * Lifecycle:  queued -> running -> completed | failed | cancelled | timed_out
+ *
+ * - Concurrency: at most `maxConcurrency` tasks run at once; the rest wait in
+ *   a FIFO queue. Tasks of the SAME session never overlap (a session is one
+ *   conversation), they run in submission order.
+ * - Every state change and every agent action becomes a TaskEvent with a
+ *   per-task, gap-free `seq`. Events are (1) appended to events.jsonl,
+ *   (2) written to the JSONL log, (3) pushed to live subscribers (SSE) and
+ *   (4) POSTed to the task's webhook (if any), in that order.
+ * - `task.heartbeat` events prove liveness while a task runs.
+ * - Consecutive text deltas are coalesced (flush every `textFlushMs`) so a
+ *   token stream does not become thousands of events.
+ * - Restart safety: tasks that were queued/running when the server stopped
+ *   are marked `failed` / `server_restarted` by `recover()`; their sessions
+ *   keep every turn that finished before, so the caller can simply re-send.
+ */
+
+import * as crypto from "node:crypto";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import type { AnthropicProvider } from "@ai-sdk/anthropic";
+import type { ModelMessage } from "ai";
+import { runAgentTurn, type AgentEvent, type TurnResult } from "../agent.js";
+import { runInContext, type TaskContext } from "../context.js";
+import type { Logger } from "../log.js";
+import { buildTaskPreamble, buildTaskSystemPrompt } from "../prompt.js";
+import { defaultCacheMode, isCacheMode, type CacheMode } from "../cache.js";
+import { SessionStore } from "../sessions.js";
+import { TaskStore, type TaskFilter } from "./store.js";
+import { WebhookDispatcher } from "./webhook.js";
+import {
+  isTerminal,
+  type SubmitRequest,
+  type TaskError,
+  type TaskEvent,
+  type TaskEventType,
+  type TaskRecord,
+  type TaskResult,
+  type TaskStatus,
+} from "./types.js";
+
+export class SubmitError extends Error {
+  constructor(
+    readonly status: number,
+    readonly code: string,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+export interface ManagerOptions {
+  store: TaskStore;
+  sessions: SessionStore;
+  provider: AnthropicProvider;
+  logger: Logger;
+  webhook?: WebhookDispatcher | null;
+  defaultModel: string;
+  /**
+   * Workdir for tasks that do not name one. When unset, `workdir` is REQUIRED
+   * in every task (so nothing runs in the server's own directory by accident).
+   */
+  defaultWorkdir?: string;
+  /**
+   * When set, a task's workdir must be inside one of these directories.
+   * Guards where tasks START — the agent's tools are not sandboxed.
+   */
+  allowedRoots?: string[];
+  /** Default for `workdir_lock` when a task does not say (default false). */
+  defaultWorkdirLock?: boolean;
+  maxConcurrency?: number; // default 2
+  heartbeatMs?: number; // default 15 000
+  defaultTimeoutMs?: number; // default 30 min
+  maxTimeoutMs?: number; // default 4 h
+  textFlushMs?: number; // default 300
+  progressSaveMs?: number; // default 2 000
+  /** Guide directory override (tests). */
+  promptDir?: string;
+}
+
+/** Runtime-only data of a queued/running task. */
+interface Live {
+  env: Record<string, string>;
+  abort: AbortController;
+  ctx?: TaskContext;
+  textBuf: string;
+  textTimer?: NodeJS.Timeout;
+  heartbeat?: NodeJS.Timeout;
+  timeout?: NodeJS.Timeout;
+  cancelReason?: string;
+  timedOut?: boolean;
+  interrupted?: boolean;
+  lastError?: string;
+  done: Promise<void>;
+  resolveDone: () => void;
+}
+
+const MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/;
+const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]{0,99}$/;
+
+/** Workdir identity for locking (Windows paths are case-insensitive). */
+const dirKey = (p: string): string => (process.platform === "win32" ? p.toLowerCase() : p);
+
+export class TaskManager {
+  private readonly o: Required<
+    Pick<ManagerOptions, "maxConcurrency" | "heartbeatMs" | "defaultTimeoutMs" | "maxTimeoutMs" | "textFlushMs" | "progressSaveMs">
+  > &
+    ManagerOptions;
+  private live = new Map<string, Live>();
+  private queue: string[] = [];
+  private running = new Set<string>();
+  private activeSessions = new Set<string>();
+  private seqs = new Map<string, number>();
+  private saveTimers = new Map<string, NodeJS.Timeout>();
+  private listeners = new Set<(ev: TaskEvent) => void>();
+  private closing = false;
+
+  constructor(opts: ManagerOptions) {
+    this.o = {
+      ...opts,
+      maxConcurrency: opts.maxConcurrency ?? 2,
+      heartbeatMs: opts.heartbeatMs ?? 15_000,
+      defaultTimeoutMs: opts.defaultTimeoutMs ?? 30 * 60_000,
+      maxTimeoutMs: opts.maxTimeoutMs ?? 4 * 3_600_000,
+      textFlushMs: opts.textFlushMs ?? 300,
+      progressSaveMs: opts.progressSaveMs ?? 2_000,
+    };
+  }
+
+  // ------------------------------------------------------------------ public
+
+  get maxConcurrency(): number {
+    return this.o.maxConcurrency;
+  }
+
+  counts(): { queued: number; running: number } {
+    return { queued: this.queue.length, running: this.running.size };
+  }
+
+  /** Is a task of this session queued or running? */
+  sessionInUse(sessionId: string): boolean {
+    if (this.activeSessions.has(sessionId)) return true;
+    return this.queue.some((id) => this.o.store.get(id)?.session_id === sessionId);
+  }
+
+  get(id: string): TaskRecord | undefined {
+    return this.o.store.get(id);
+  }
+
+  list(filter?: TaskFilter): TaskRecord[] {
+    return this.o.store.list(filter);
+  }
+
+  events(id: string, after = 0, limit = 1000): TaskEvent[] {
+    return this.o.store.readEvents(id, after, limit);
+  }
+
+  /** Live event feed (all tasks). Returns the unsubscribe function. */
+  subscribe(listener: (ev: TaskEvent) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  /** Resolves when the task reached a terminal state (immediately if it already has). */
+  async waitFor(id: string): Promise<TaskRecord | undefined> {
+    const live = this.live.get(id);
+    if (live) await live.done;
+    return this.o.store.get(id);
+  }
+
+  /**
+   * Validates and enqueues a task. Idempotent on `task_id`: re-sending the
+   * same id returns the existing task (`deduplicated: true`).
+   */
+  submit(req: SubmitRequest): { task: TaskRecord; deduplicated: boolean } {
+    if (this.closing) throw new SubmitError(503, "shutting_down", "server is shutting down");
+    const o = this.o;
+    const bad: (code: string, msg: string) => never = (code, msg) => {
+      throw new SubmitError(400, code, msg);
+    };
+
+    // ---- validation
+    if (typeof req.prompt !== "string" || !req.prompt.trim()) bad("invalid_request", "`prompt` (non-empty string) is required");
+    if (req.prompt.length > 200_000) bad("invalid_request", "`prompt` is too long (max 200000 chars)");
+
+    if (req.task_id !== undefined && !TaskStore.isValidId(req.task_id)) {
+      bad("invalid_request", "`task_id` must match [A-Za-z0-9][A-Za-z0-9._-]{0,127}");
+    }
+    if (req.session_id !== undefined && !SessionStore.isValidId(req.session_id)) {
+      bad("invalid_request", "`session_id` must match [A-Za-z0-9][A-Za-z0-9._-]{0,127}");
+    }
+
+    // ---- idempotency
+    if (req.task_id && o.store.has(req.task_id)) {
+      const existing = o.store.get(req.task_id)!;
+      const samePrompt = existing.prompt === req.prompt;
+      const sameSession = req.session_id === undefined || existing.session_id === req.session_id;
+      if (!samePrompt || !sameSession) {
+        throw new SubmitError(409, "task_id_conflict", `task_id "${req.task_id}" already exists with a different prompt/session`);
+      }
+      return { task: existing, deduplicated: true };
+    }
+
+    const model = req.model ?? o.defaultModel;
+    if (typeof model !== "string" || !MODEL_RE.test(model)) bad("invalid_request", "`model` is not a valid model id");
+
+    const maxSteps = req.max_steps ?? 50;
+    if (!Number.isInteger(maxSteps) || maxSteps < 1 || maxSteps > 500) bad("invalid_request", "`max_steps` must be an integer 1-500");
+
+    const timeoutMs = req.timeout_ms ?? o.defaultTimeoutMs;
+    if (!Number.isInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > o.maxTimeoutMs) {
+      bad("invalid_request", `\`timeout_ms\` must be an integer 1000-${o.maxTimeoutMs}`);
+    }
+
+    const workdir = this.resolveWorkdir(req.workdir);
+    if (req.workdir_lock !== undefined && typeof req.workdir_lock !== "boolean") {
+      bad("invalid_request", "`workdir_lock` must be a boolean");
+    }
+    const workdirLock = req.workdir_lock ?? this.o.defaultWorkdirLock ?? false;
+
+    if (req.cache !== undefined && !isCacheMode(req.cache)) bad("invalid_request", '`cache` must be "5m", "1h" or "off"');
+    const cache: CacheMode = req.cache ?? defaultCacheMode();
+
+    const env: Record<string, string> = {};
+    if (req.env !== undefined) {
+      if (typeof req.env !== "object" || req.env === null || Array.isArray(req.env)) bad("invalid_request", "`env` must be an object of strings");
+      const entries = Object.entries(req.env);
+      if (entries.length > 50) bad("invalid_request", "`env` may have at most 50 variables");
+      for (const [k, v] of entries) {
+        if (!ENV_KEY_RE.test(k)) bad("invalid_request", `invalid env variable name: ${k}`);
+        if (typeof v !== "string" || v.length > 8192) bad("invalid_request", `env value of ${k} must be a string (max 8192 chars)`);
+        env[k] = v;
+      }
+    }
+
+    if (req.system_append !== undefined && (typeof req.system_append !== "string" || req.system_append.length > 20_000)) {
+      bad("invalid_request", "`system_append` must be a string (max 20000 chars)");
+    }
+
+    if (req.callback !== undefined) {
+      const cb = req.callback;
+      if (typeof cb !== "object" || cb === null || typeof cb.url !== "string") bad("invalid_request", "`callback.url` is required");
+      let u: URL;
+      try {
+        u = new URL(cb.url);
+      } catch {
+        return bad("invalid_request", "`callback.url` is not a valid URL");
+      }
+      if (u.protocol !== "http:" && u.protocol !== "https:") bad("invalid_request", "`callback.url` must be http(s)");
+      if (cb.events !== undefined && (!Array.isArray(cb.events) || cb.events.length > 30 || cb.events.some((e) => typeof e !== "string"))) {
+        bad("invalid_request", "`callback.events` must be an array of up to 30 strings");
+      }
+      if (!o.webhook) bad("callbacks_disabled", "this server has webhooks disabled");
+    }
+
+    // ---- session (create when missing)
+    let sessionId = req.session_id;
+    let sessionCreated = false;
+    if (!sessionId) {
+      sessionId = `ses_${crypto.randomBytes(8).toString("hex")}`;
+    }
+    if (!o.sessions.exists(sessionId)) {
+      o.sessions.create(sessionId);
+      sessionCreated = true;
+    }
+
+    // ---- record
+    const id = req.task_id ?? `tsk_${crypto.randomBytes(8).toString("hex")}`;
+    const now = new Date().toISOString();
+    const rec: TaskRecord = {
+      id,
+      status: "queued",
+      session_id: sessionId,
+      session_created: sessionCreated,
+      prompt: req.prompt,
+      model,
+      max_steps: maxSteps,
+      timeout_ms: timeoutMs,
+      cache,
+      workdir,
+      workdir_lock: workdirLock,
+      env_keys: Object.keys(env),
+      ...(req.system_append ? { system_append: req.system_append } : {}),
+      ...(req.context !== undefined ? { context: req.context } : {}),
+      ...(req.callback ? { callback: { url: req.callback.url, events: req.callback.events }, callback_stats: { delivered: 0, failed: 0 } } : {}),
+      created_at: now,
+      progress: { steps: 0, tool_calls: 0, last_event_seq: 0, last_activity_at: now },
+    };
+    o.store.put(rec);
+    o.logger.info("task.submitted", {
+      task_id: id, session_id: sessionId, session_created: sessionCreated, model, workdir, workdir_lock: workdirLock, cache,
+      max_steps: maxSteps, timeout_ms: timeoutMs, env_keys: rec.env_keys, has_callback: Boolean(rec.callback),
+      prompt: rec.prompt, context: rec.context,
+    });
+
+    let resolveDone!: () => void;
+    const done = new Promise<void>((r) => (resolveDone = r));
+    this.live.set(id, { env, abort: new AbortController(), textBuf: "", done, resolveDone });
+    this.seqs.set(id, 0);
+    this.queue.push(id);
+    this.emit(id, "task.queued", {
+      position: this.queue.length - 1,
+      // why it cannot start right now: capacity | session | workdir (null = it starts immediately)
+      waiting_for: this.blockReason(rec),
+      session_id: sessionId,
+      session_created: sessionCreated,
+      workdir,
+    });
+    this.pump();
+    return { task: rec, deduplicated: false };
+  }
+
+  /**
+   * Cancels a task. Queued: immediately. Running: aborts the model call and
+   * the running shell command, resolves when the task has reached `cancelled`
+   * (or after 10 s). Finished tasks are returned unchanged.
+   */
+  async cancel(id: string, reason?: string): Promise<{ task: TaskRecord; already_finished: boolean } | undefined> {
+    const rec = this.o.store.get(id);
+    if (!rec) return undefined;
+    if (isTerminal(rec.status)) return { task: rec, already_finished: true };
+    const live = this.live.get(id)!;
+    live.cancelReason = reason?.slice(0, 500) || "cancelled by caller";
+
+    const qi = this.queue.indexOf(id);
+    if (qi >= 0) {
+      this.queue.splice(qi, 1);
+      this.finalize(id, "cancelled", {});
+    } else {
+      live.abort.abort();
+      await Promise.race([live.done, new Promise((r) => setTimeout(r, 10_000))]);
+    }
+    return { task: this.o.store.get(id)!, already_finished: false };
+  }
+
+  /**
+   * Startup recovery: tasks that were queued/running when the server stopped
+   * are finished as `failed` / `server_restarted` (and their webhook fires).
+   */
+  recover(): string[] {
+    const stale = this.o.store.list({ status: ["queued", "running"], limit: Number.MAX_SAFE_INTEGER });
+    for (const rec of stale) {
+      this.seqs.set(rec.id, this.o.store.lastSeq(rec.id));
+      this.live.set(rec.id, {
+        env: {}, abort: new AbortController(), textBuf: "", done: Promise.resolve(), resolveDone: () => undefined,
+      });
+      this.finalize(rec.id, "failed", {
+        error: { code: "server_restarted", message: "the server stopped while this task was queued or running; re-send it (same session_id continues the conversation)" },
+      });
+    }
+    if (stale.length) this.o.logger.warn("tasks.recovered", { count: stale.length, task_ids: stale.map((t) => t.id) });
+    return stale.map((t) => t.id);
+  }
+
+  /** Graceful stop: no new tasks, running ones are interrupted, deliveries flushed. */
+  async shutdown(graceMs = 10_000): Promise<void> {
+    this.closing = true;
+    for (const id of [...this.queue]) {
+      this.queue.splice(this.queue.indexOf(id), 1);
+      this.live.get(id)!.interrupted = true;
+      this.finalize(id, "failed", {
+        error: { code: "server_restarted", message: "the server was shut down before this task started" },
+      });
+    }
+    const pending: Promise<void>[] = [];
+    for (const id of this.running) {
+      const live = this.live.get(id)!;
+      live.interrupted = true;
+      live.abort.abort();
+      pending.push(live.done);
+    }
+    await Promise.race([Promise.all(pending), new Promise((r) => setTimeout(r, graceMs))]);
+    await Promise.race([this.o.webhook?.idle(), new Promise((r) => setTimeout(r, graceMs))]);
+    this.flushSaves();
+  }
+
+  // ----------------------------------------------------------------- internal
+
+  /**
+   * Turns the requested workdir into a canonical absolute path (symlinks
+   * resolved, so `..` tricks and links cannot slip past `allowedRoots`).
+   */
+  private resolveWorkdir(requested?: string): string {
+    if (requested === undefined && !this.o.defaultWorkdir) {
+      throw new SubmitError(400, "workdir_required", "`workdir` is required (the server has no default workdir configured)");
+    }
+    if (requested !== undefined && (typeof requested !== "string" || !requested.trim())) {
+      throw new SubmitError(400, "invalid_request", "`workdir` must be a non-empty string");
+    }
+    const base = this.o.defaultWorkdir ?? process.cwd();
+    const wanted = path.resolve(base, requested ?? ".");
+    let dir: string;
+    try {
+      dir = fs.realpathSync(wanted);
+      if (!fs.statSync(dir).isDirectory()) throw new Error("not a directory");
+    } catch {
+      throw new SubmitError(400, "invalid_workdir", `workdir is not an existing directory: ${wanted}`);
+    }
+    const roots = this.o.allowedRoots;
+    if (roots && roots.length) {
+      const inside = roots.some((r) => {
+        let root = path.resolve(r);
+        try {
+          root = fs.realpathSync(root);
+        } catch {
+          /* keep the unresolved root */
+        }
+        const rel = path.relative(root, dir);
+        return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+      });
+      if (!inside) throw new SubmitError(403, "workdir_not_allowed", `workdir is outside the allowed roots: ${dir}`);
+    }
+    return dir;
+  }
+
+  /** Starts queued tasks while there is capacity. */
+  private pump(): void {
+    if (this.closing) return;
+    // Scan the queue in order. A task that cannot start holds back LATER tasks
+    // of the same session (a session's tasks keep their order) and, if it wants
+    // the workdir exclusively, later tasks of that workdir (no starvation).
+    const holdSessions = new Set<string>();
+    const holdDirs = new Set<string>();
+    for (let i = 0; i < this.queue.length; ) {
+      if (this.running.size >= this.o.maxConcurrency) return;
+      const id = this.queue[i]!;
+      const rec = this.o.store.get(id)!;
+      const key = dirKey(rec.workdir);
+      if (holdSessions.has(rec.session_id) || holdDirs.has(key) || this.blockReason(rec) !== null) {
+        holdSessions.add(rec.session_id);
+        if (rec.workdir_lock) holdDirs.add(key);
+        i++;
+        continue;
+      }
+      this.queue.splice(i, 1);
+      this.running.add(id);
+      this.activeSessions.add(rec.session_id);
+      void this.execute(id).catch((e) => {
+        // execute() handles its own errors; this is a last-resort guard
+        this.o.logger.error("task.internal_error", { task_id: id, error: e });
+        if (!isTerminal(this.o.store.get(id)!.status)) {
+          this.finalize(id, "failed", { error: { code: "internal_error", message: String((e as Error)?.message ?? e) } });
+        }
+      });
+    }
+  }
+
+  /**
+   * Why `rec` cannot start right now (null = it can):
+   *  - capacity: all slots are busy
+   *  - session:  another task of the same session is running
+   *  - workdir:  another task runs in the same workdir and one of the two wants exclusivity
+   */
+  private blockReason(rec: TaskRecord): "capacity" | "session" | "workdir" | null {
+    if (this.activeSessions.has(rec.session_id)) return "session";
+    const key = dirKey(rec.workdir);
+    for (const rid of this.running) {
+      const r = this.o.store.get(rid)!;
+      if (dirKey(r.workdir) === key && (rec.workdir_lock || r.workdir_lock)) return "workdir";
+    }
+    if (this.running.size >= this.o.maxConcurrency) return "capacity";
+    return null;
+  }
+
+  private async execute(id: string): Promise<void> {
+    const o = this.o;
+    const rec = o.store.get(id)!;
+    const live = this.live.get(id)!;
+
+    rec.status = "running";
+    rec.started_at = new Date().toISOString();
+    this.saveNow(rec);
+
+    const session = o.sessions.load(rec.session_id);
+    const base: ModelMessage[] = session?.messages ?? [];
+    this.emit(id, "task.started", {
+      model: rec.model, workdir: rec.workdir, session_id: rec.session_id, session_created: rec.session_created,
+      // set when this session last worked somewhere else (paths in its history may not apply)
+      ...(session?.meta.workdir && dirKey(session.meta.workdir) !== dirKey(rec.workdir)
+        ? { session_workdir_changed_from: session.meta.workdir }
+        : {}),
+      resumed_messages: base.length, max_steps: rec.max_steps, timeout_ms: rec.timeout_ms,
+    });
+
+    // task-specific facts live in the user message so the system prompt (and
+    // with it the cached prefix of the session) stays identical across tasks
+    const userMessage = `${buildTaskPreamble({ taskId: id, cwd: rec.workdir })}\n\n${rec.prompt}`;
+    const history: ModelMessage[] = [...base, { role: "user", content: userMessage }];
+    const mark = base.length;
+    const startedAt = Date.now();
+
+    live.ctx = {
+      taskId: id,
+      cwd: rec.workdir,
+      env: live.env,
+      todos: [],
+      cache: rec.cache,
+      report: (r) => {
+        rec.progress.last_report = { ...r, at: new Date().toISOString() };
+        this.emit(id, "agent.report", { message: r.message, percent: r.percent, phase: r.phase });
+      },
+    };
+
+    live.heartbeat = setInterval(() => {
+      this.emit(id, "task.heartbeat", {
+        elapsed_ms: Date.now() - startedAt,
+        steps: rec.progress.steps,
+        tool_calls: rec.progress.tool_calls,
+        current_tool: rec.progress.current_tool ?? null,
+        last_activity_at: rec.progress.last_activity_at,
+      });
+    }, o.heartbeatMs);
+    live.heartbeat.unref();
+    live.timeout = setTimeout(() => {
+      live.timedOut = true;
+      live.abort.abort();
+    }, rec.timeout_ms);
+    live.timeout.unref();
+
+    const system = buildTaskSystemPrompt({ systemAppend: rec.system_append, promptDir: o.promptDir });
+
+    let turn: TurnResult | null = null;
+    let thrown: unknown;
+    try {
+      turn = await runInContext(live.ctx, () =>
+        runAgentTurn(o.provider, rec.model, history, rec.max_steps, live.abort.signal, (e) => this.onAgentEvent(id, e), system),
+      );
+    } catch (e) {
+      thrown = e;
+    }
+
+    clearInterval(live.heartbeat);
+    clearTimeout(live.timeout);
+    this.flushText(id);
+
+    const durationMs = Date.now() - startedAt;
+
+    // ---- classify the outcome
+    if (live.abort.signal.aborted || turn?.finishReason === "aborted") {
+      if (live.interrupted) {
+        return this.finalize(id, "failed", { error: { code: "server_restarted", message: "the server was shut down while this task was running" } });
+      }
+      return this.finalize(id, live.timedOut ? "timed_out" : "cancelled", {});
+    }
+    if (thrown || !turn) {
+      const msg = String((thrown as Error)?.message ?? live.lastError ?? "unknown error").slice(0, 2000);
+      return this.finalize(id, "failed", { error: { code: "agent_error", message: msg } });
+    }
+
+    const result: TaskResult = {
+      text: turn.text,
+      finish_reason: turn.finishReason,
+      steps: turn.steps,
+      tool_calls: turn.toolCalls,
+      usage: turn.usage,
+      duration_ms: durationMs,
+    };
+
+    const commitable = ["stop", "length", "tool-calls"].includes(turn.finishReason);
+    if (commitable) {
+      try {
+        o.sessions.appendTurn(rec.session_id, history.slice(mark), { task_id: id, model: rec.model, prompt: rec.prompt });
+      } catch (e) {
+        return this.finalize(id, "failed", {
+          result,
+          error: { code: "internal_error", message: `could not save the session: ${(e as Error).message}` },
+        });
+      }
+    }
+
+    if (turn.finishReason === "stop") return this.finalize(id, "completed", { result });
+    if (turn.finishReason === "tool-calls") {
+      return this.finalize(id, "failed", {
+        result,
+        error: { code: "max_steps", message: `stopped after ${rec.max_steps} steps before the model finished; the work so far is in the session — send a follow-up task with the same session_id to continue` },
+      });
+    }
+    if (turn.finishReason === "length") {
+      return this.finalize(id, "failed", { result, error: { code: "max_tokens", message: "the model hit its output limit" } });
+    }
+    return this.finalize(id, "failed", {
+      result,
+      error: { code: "agent_error", message: live.lastError ?? `model finished with reason "${turn.finishReason}"` },
+    });
+  }
+
+  private onAgentEvent(id: string, e: AgentEvent): void {
+    const rec = this.o.store.get(id)!;
+    const live = this.live.get(id)!;
+    switch (e.type) {
+      case "step_start":
+        this.flushText(id);
+        rec.progress.steps = e.step;
+        this.emit(id, "step.started", { step: e.step });
+        break;
+      case "step_finish":
+        this.flushText(id);
+        this.emit(id, "step.finished", { step: e.step, finish_reason: e.finish_reason, usage: e.usage });
+        break;
+      case "text":
+        live.textBuf += e.delta;
+        if (live.textBuf.length >= 4000) this.flushText(id);
+        else if (!live.textTimer) live.textTimer = setTimeout(() => this.flushText(id), this.o.textFlushMs);
+        break;
+      case "tool_call":
+        rec.progress.tool_calls++;
+        if (e.name === "report_progress") break; // surfaced as agent.report by the tool itself
+        this.flushText(id);
+        rec.progress.current_tool = { id: e.id, name: e.name, started_at: new Date().toISOString() };
+        this.emit(id, "tool.started", { tool_call_id: e.id, name: e.name, input: e.input });
+        break;
+      case "tool_result": {
+        if (e.name === "report_progress") break;
+        rec.progress.current_tool = undefined;
+        const ok = (e.output as { ok?: unknown } | null)?.ok;
+        this.emit(id, "tool.finished", { tool_call_id: e.id, name: e.name, ...(typeof ok === "boolean" ? { ok } : {}), output: e.output });
+        if (e.name === "todo_write" && ok === true && live.ctx) {
+          rec.progress.todos = live.ctx.todos;
+          this.emit(id, "agent.todos", { todos: live.ctx.todos });
+        }
+        break;
+      }
+      case "tool_error":
+        rec.progress.current_tool = undefined;
+        this.emit(id, "tool.failed", { tool_call_id: e.id, name: e.name, error: e.error });
+        break;
+      case "error":
+        live.lastError = e.error;
+        this.o.logger.warn("task.model_error", { task_id: id, error: e.error });
+        break;
+    }
+  }
+
+  private flushText(id: string): void {
+    const live = this.live.get(id);
+    if (!live) return;
+    if (live.textTimer) {
+      clearTimeout(live.textTimer);
+      live.textTimer = undefined;
+    }
+    if (live.textBuf) {
+      const text = live.textBuf;
+      live.textBuf = "";
+      this.emit(id, "agent.text", { text });
+    }
+  }
+
+  /** Writes + distributes one event. Synchronous, so order == emit order. */
+  private emit(id: string, type: TaskEventType, data: Record<string, unknown>): TaskEvent {
+    const o = this.o;
+    const rec = o.store.get(id)!;
+    const seq = (this.seqs.get(id) ?? o.store.lastSeq(id)) + 1;
+    this.seqs.set(id, seq);
+    const ts = new Date().toISOString();
+    const ev: TaskEvent = { seq, ts, task_id: id, session_id: rec.session_id, type, data };
+
+    try {
+      o.store.appendEvent(ev);
+    } catch (e) {
+      o.logger.error("task.event_write_failed", { task_id: id, seq, error: e });
+    }
+    rec.progress.last_event_seq = seq;
+    if (type !== "task.heartbeat") rec.progress.last_activity_at = ts;
+    this.scheduleSave(rec);
+
+    o.logger.info(type, { task_id: id, session_id: rec.session_id, seq, ...data });
+
+    for (const l of this.listeners) {
+      try {
+        l(ev);
+      } catch {
+        /* a broken subscriber must not break the task */
+      }
+    }
+    if (rec.callback && o.webhook) {
+      o.webhook.enqueue(rec.callback, ev, (r) => {
+        const st = (rec.callback_stats ??= { delivered: 0, failed: 0 });
+        if (r.ok) st.delivered++;
+        else {
+          st.failed++;
+          st.last_error = r.error;
+        }
+        this.scheduleSave(rec);
+      });
+    }
+    return ev;
+  }
+
+  /** Moves a task to a terminal state, emits the terminal event, frees resources. */
+  private finalize(
+    id: string,
+    status: Exclude<TaskStatus, "queued" | "running">,
+    extra: { result?: TaskResult; error?: TaskError },
+  ): void {
+    const rec = this.o.store.get(id)!;
+    const live = this.live.get(id);
+    if (isTerminal(rec.status)) return;
+
+    this.flushText(id);
+    if (live) {
+      clearInterval(live.heartbeat);
+      clearTimeout(live.timeout);
+    }
+    rec.status = status;
+    rec.finished_at = new Date().toISOString();
+    rec.progress.current_tool = undefined;
+    if (extra.result) rec.result = extra.result;
+    if (extra.error) rec.error = extra.error;
+    if (status === "cancelled") rec.cancel_reason = live?.cancelReason;
+
+    switch (status) {
+      case "completed":
+        this.emit(id, "task.completed", { result: rec.result });
+        break;
+      case "failed":
+        this.emit(id, "task.failed", { error: rec.error, ...(rec.result ? { result: rec.result } : {}) });
+        break;
+      case "cancelled":
+        this.emit(id, "task.cancelled", { reason: rec.cancel_reason });
+        break;
+      case "timed_out":
+        this.emit(id, "task.timed_out", { timeout_ms: rec.timeout_ms });
+        break;
+    }
+    this.saveNow(rec);
+
+    this.running.delete(id);
+    this.activeSessions.delete(rec.session_id);
+    this.seqs.delete(id);
+    this.live.delete(id);
+    live?.resolveDone();
+    this.pump();
+  }
+
+  /** Debounced save (progress changes often; the file does not need every tick). */
+  private scheduleSave(rec: TaskRecord): void {
+    if (this.saveTimers.has(rec.id)) return;
+    const t = setTimeout(() => {
+      this.saveTimers.delete(rec.id);
+      this.o.store.put(rec);
+    }, this.o.progressSaveMs);
+    t.unref();
+    this.saveTimers.set(rec.id, t);
+  }
+
+  private saveNow(rec: TaskRecord): void {
+    const t = this.saveTimers.get(rec.id);
+    if (t) {
+      clearTimeout(t);
+      this.saveTimers.delete(rec.id);
+    }
+    this.o.store.put(rec);
+  }
+
+  /** Writes every record with a pending debounced save (shutdown). */
+  private flushSaves(): void {
+    for (const [id, t] of this.saveTimers) {
+      clearTimeout(t);
+      const rec = this.o.store.get(id);
+      if (rec) this.o.store.put(rec);
+    }
+    this.saveTimers.clear();
+  }
+}

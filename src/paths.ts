@@ -12,6 +12,16 @@ import * as path from "node:path";
 import * as os from "node:os";
 
 export const APP_NAME = "WrongForge";
+
+/** Version from package.json ("0.0.0" if it cannot be read). */
+export const VERSION: string = (() => {
+  try {
+    const pkg = path.join(import.meta.dirname ?? ".", "..", "package.json");
+    return String(JSON.parse(fs.readFileSync(pkg, "utf8")).version ?? "0.0.0");
+  } catch {
+    return "0.0.0";
+  }
+})();
 const DIR_NAME = ".wrongforge";
 const LEGACY_DIR_NAME = ".wrongminiagent";
 
