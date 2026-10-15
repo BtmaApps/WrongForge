@@ -317,6 +317,16 @@ export class TaskManager {
       }
     }
 
+    let builtinTools: string[] | undefined;
+    if (req.builtin_tools !== undefined) {
+      if (!Array.isArray(req.builtin_tools) || req.builtin_tools.length > 50 || req.builtin_tools.some((n) => typeof n !== "string")) {
+        bad("invalid_request", "`builtin_tools` must be an array of up to 50 tool names");
+      }
+      const unknown = req.builtin_tools.filter((n) => !Object.hasOwn(agentTools, n));
+      if (unknown.length) bad("invalid_request", `\`builtin_tools\`: unknown built-in tool(s) ${unknown.join(", ")} (see GET /v1/tools)`);
+      builtinTools = [...new Set(req.builtin_tools)];
+    }
+
     let mcpSelection: string[] | undefined;
     if (req.mcp !== undefined) {
       if (!Array.isArray(req.mcp) || req.mcp.length > 50 || req.mcp.some((n) => typeof n !== "string")) {
@@ -363,6 +373,7 @@ export class TaskManager {
       ...(req.callback ? { callback: { url: req.callback.url, events: req.callback.events }, callback_stats: { delivered: 0, failed: 0 } } : {}),
       ...(gateway ? { gateway: describeGateway(gateway) } : {}),
       ...(mcpSelection ? { mcp: mcpSelection } : {}),
+      ...(builtinTools ? { builtin_tools: builtinTools } : {}),
       created_at: now,
       progress: { steps: 0, tool_calls: 0, last_event_seq: 0, last_activity_at: now },
     };
@@ -691,7 +702,7 @@ export class TaskManager {
       live.lastError = undefined;
       try {
         turn = await runInContext(live.ctx, () =>
-          runAgentTurn(o.client, rec.model, history, rec.max_steps, live.abort.signal, (e) => this.onAgentEvent(id, e), system, guard, extraTools),
+          runAgentTurn(o.client, rec.model, history, rec.max_steps, live.abort.signal, (e) => this.onAgentEvent(id, e), system, guard, extraTools, rec.builtin_tools),
         );
       } catch (e) {
         thrown = e;

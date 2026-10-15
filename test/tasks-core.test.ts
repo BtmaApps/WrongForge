@@ -56,6 +56,8 @@ async function main(): Promise<void> {
   await bad({ prompt: "x", workdir: dirA, callback: { url: "ftp://x" } }, 400, "invalid_request", "bad callback url");
   await bad({ prompt: "x", workdir: dirA, env: { "bad-name": "1" } }, 400, "invalid_request", "bad env name");
   await bad({ prompt: "x", workdir: dirA, gateway: { url: "http://example.com" } }, 400, "invalid_gateway", "gateway host not allowed");
+  await bad({ prompt: "x", workdir: dirA, builtin_tools: ["ls", "rm_rf"] }, 400, "invalid_request", "unknown built-in tool");
+  await bad({ prompt: "x", workdir: dirA, builtin_tools: "ls" }, 400, "invalid_request", "builtin_tools not an array");
   const badJson = await fetch(`${h.base}/v1/tasks`, { method: "POST", headers: { Authorization: `Bearer ${h.key}`, "Content-Type": "application/json" }, body: "{nope" });
   assert(badJson.status === 400 && (await badJson.json()).error.code === "invalid_json", "invalid JSON body");
 
@@ -102,6 +104,17 @@ async function main(): Promise<void> {
   assert(fake.turns().length === 2, "dedup did not call the model again");
   const conflict = await post({ task_id: "life-1", prompt: "something else" });
   assert(conflict.status === 409 && conflict.body.error.code === "task_id_conflict", "same task_id, other prompt -> 409");
+
+  // ============================================================ builtin_tools allowlist
+  assert(Array.isArray(info.features) && info.features.includes("builtin_tools"), "info advertises builtin_tools");
+  const nB = fake.turns().length;
+  const bt = (await post({ task_id: "bt-1", builtin_tools: ["ls", "ls"], prompt: `${tool("bash", { command: "echo hi" })} [[say restricted]]`, wait: true })).body.task;
+  assert(bt.status === "completed" && JSON.stringify(bt.builtin_tools) === '["ls"]', "allowlist persisted (deduped)");
+  const btTools = fake.turns().slice(nB).map((t) => (t.body.tools ?? []).map((x: any) => x.name));
+  assert(btTools.length > 0 && btTools.every((names) => names.join() === "ls"), `model sees only the allowed built-ins (got ${JSON.stringify(btTools[0])})`);
+  const btEv = await h.events("bt-1");
+  const btBash = btEv.find((e: any) => e.type === "tool.failed" && e.data.name === "bash");
+  assert(btBash && /unknown tool/.test(btBash.data.error) && !fs.existsSync(path.join(dirA, "hi")), "a disallowed built-in is refused, not run");
 
   // ============================================================ wait / stream / replay / long-poll
   const waited = await post({ prompt: "[[say waited]]", wait: true });

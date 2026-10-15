@@ -254,7 +254,10 @@ recovered at startup.
 `max_steps` (1–500, default 50), `timeout_ms` (default 30 min), `workdir`
 (required unless `WRONGFORGE_WORKDIR` is set; checked against
 `WRONGFORGE_ALLOWED_ROOTS`), `workdir_lock`, `cache`, `env`, `system_append`,
-`context` (opaque, echoed back), `callback`, `gateway`, `mcp`. The authoritative
+`context` (opaque, echoed back), `callback`, `gateway`, `mcp`, `builtin_tools`
+(allowlist of the built-in tools for this task, e.g. read-only ones so writes and
+shell go through the orchestrator's gateway; omit = all; `/v1/info` lists
+`features: ["builtin_tools"]`). The authoritative
 list is `SubmitRequest` in `src/tasks/types.ts`.
 
 **Events** (`seq` is per task, strictly increasing and gap-free; stored in

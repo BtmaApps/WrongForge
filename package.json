@@ -14,8 +14,9 @@
     "status": "tsx src/main.ts status",
     "url": "tsx src/main.ts url",
     "models": "tsx src/main.ts models",
-    "test": "tsx test/tools.test.ts && tsx test/oauth-mock.test.ts && tsx test/agent-e2e.test.ts && tsx test/tasks-core.test.ts && tsx test/tasks-concurrency.test.ts && tsx test/log.test.ts && tsx test/apikey.test.ts && tsx test/mcp.test.ts",
-    "typecheck": "tsc --noEmit"
+    "test": "tsx test/tools.test.ts && tsx test/unit-core.test.ts && tsx test/unit-net.test.ts && tsx test/oauth-mock.test.ts && tsx test/agent-e2e.test.ts && tsx test/tasks-core.test.ts && tsx test/tasks-concurrency.test.ts && tsx test/log.test.ts && tsx test/apikey.test.ts && tsx test/mcp.test.ts && tsx test/cli.test.ts",
+    "typecheck": "tsc --noEmit",
+    "coverage": "c8 --no-clean tsx test/tools.test.ts && c8 --no-clean tsx test/unit-core.test.ts && c8 --no-clean tsx test/unit-net.test.ts && tsx test/unit-net.test.ts && c8 --no-clean tsx test/oauth-mock.test.ts && c8 --no-clean tsx test/agent-e2e.test.ts && c8 --no-clean tsx test/tasks-core.test.ts && c8 --no-clean tsx test/tasks-concurrency.test.ts && c8 --no-clean tsx test/log.test.ts && c8 --no-clean tsx test/apikey.test.ts && c8 --no-clean tsx test/mcp.test.ts && c8 --no-clean tsx test/cli.test.ts && tsx test/cli.test.ts && c8 report --reporter=text --all --include \"src/**\""
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.134.0",
@@ -24,6 +25,7 @@
   },
   "devDependencies": {
     "@types/node": "^24.19.2",
+    "c8": "^12.0.0",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2"
   }

@@ -282,6 +282,8 @@ export function createAgentServer(opts: ServerOptions): http.Server {
       name: APP_NAME,
       version: VERSION,
       protocol: 1,
+      /** Optional submit features this server understands (older servers ignore unknown fields). */
+      features: ["builtin_tools"],
       signed_in: oauth.signedIn,
       default_model: app.defaultModel,
       models: Object.keys(KNOWN_MODELS),
@@ -520,15 +522,20 @@ export function createAgentServer(opts: ServerOptions): http.Server {
 }
 
 // ------------------------------------------------------------------ CLI entry
-const isMain = process.argv[1] && /server\.(ts|js)$/.test(process.argv[1]);
-if (isMain) {
-  let resolved;
-  try {
-    resolved = resolveApiKey(); // env -> saved file -> generate + save
-  } catch (e) {
-    console.error((e as Error).message);
-    process.exit(1);
-  }
+export interface EnvServer {
+  app: App;
+  server: http.Server;
+  port: number;
+  shutdown: (signal?: string) => Promise<void>;
+}
+
+/**
+ * The `npm run serve` startup as a callable: resolve the key, build the app,
+ * listen, print the banner, wire graceful shutdown. Exported so the test
+ * suite can run the real entry in-process (and shut it down cleanly).
+ */
+export async function startEnvServer(): Promise<EnvServer> {
+  const resolved = resolveApiKey(); // env -> saved file -> generate + save
   const oauth = new ClaudeOAuth(process.env.CLAUDE_TOKEN_STORE || undefined);
   const host = process.env.HOST || "127.0.0.1";
   const port = Number(process.env.PORT || 8787);
@@ -548,27 +555,30 @@ if (isMain) {
     );
     process.exit(1);
   });
-  server.listen(port, host, () => {
-    app.logger.info("server.started", { host, port, version: VERSION, model: app.defaultModel, max_concurrency: app.manager.maxConcurrency, recovered: recovered.length });
-    printBanner({
-      version: VERSION,
-      host,
-      port,
-      key: resolved,
-      signedIn: oauth.signedIn,
-      model: app.defaultModel || DEFAULT_MODEL,
-      dataDir: dataDir(),
-      logDir: app.dirs.logs,
-      maxConcurrency: app.manager.maxConcurrency,
-      promptFiles: loadPromptFiles().map((f) => f.name),
-      defaultWorkdir: app.defaultWorkdir ?? null,
-      mcpServers: app.mcp.status().servers.length,
-      recoveredTasks: recovered.length,
+  await new Promise<void>((resolveListen) => {
+    server.listen(port, host, () => {
+      app.logger.info("server.started", { host, port, version: VERSION, model: app.defaultModel, max_concurrency: app.manager.maxConcurrency, recovered: recovered.length });
+      printBanner({
+        version: VERSION,
+        host,
+        port,
+        key: resolved,
+        signedIn: oauth.signedIn,
+        model: app.defaultModel || DEFAULT_MODEL,
+        dataDir: dataDir(),
+        logDir: app.dirs.logs,
+        maxConcurrency: app.manager.maxConcurrency,
+        promptFiles: loadPromptFiles().map((f) => f.name),
+        defaultWorkdir: app.defaultWorkdir ?? null,
+        mcpServers: app.mcp.status().servers.length,
+        recoveredTasks: recovered.length,
+      });
+      resolveListen();
     });
   });
 
   let stopping = false;
-  const shutdown = (signal: string): void => {
+  const shutdown = (signal = "shutdown"): void => {
     if (stopping) return;
     stopping = true;
     console.log(`\n${signal}: stopping — interrupting running tasks…`);
@@ -579,10 +589,20 @@ if (isMain) {
       await app.manager.shutdown();
       await app.mcp.closeAll();
       app.logger.info("server.stopped", {});
-      process.exit(0);
     })();
     setTimeout(() => process.exit(0), 20_000).unref(); // never hang on exit
   };
   process.on("SIGINT", () => shutdown("SIGINT"));
   process.on("SIGTERM", () => shutdown("SIGTERM"));
+  return { app, server, port: (server.address() as { port: number }).port, shutdown: () => Promise.resolve(shutdown()) };
+}
+
+const isMain = process.argv[1] && /server\.(ts|js)$/.test(process.argv[1]);
+if (isMain) {
+  try {
+    await startEnvServer();
+  } catch (e) {
+    console.error((e as Error).message);
+    process.exit(1);
+  }
 }

@@ -50,6 +50,9 @@ export async function assertPublicUrl(raw: string): Promise<URL> {
   if (u.username || u.password) {
     throw new Error("blocked: URLs with embedded credentials are not allowed");
   }
+  // Tests only: allows the offline suite to exercise the fetch loop against
+  // a local mock server. Never set in production.
+  if (process.env.WRONGFORGE_ALLOW_PRIVATE_URLS === "1") return u;
   const host = u.hostname.replace(/^\[|\]$/g, "");
   const addrs = net.isIP(host)
     ? [host]

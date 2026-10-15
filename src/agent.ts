@@ -133,8 +133,13 @@ export async function runAgentTurn(
   system: string = SYSTEM_PROMPT,
   guard?: ContextGuard,
   extraTools: ToolSet = {},
+  /** Allowlist of built-in tools (undefined = all); extraTools are always included. */
+  builtinTools?: readonly string[],
 ): Promise<TurnResult> {
-  const tools: ToolSet = { ...agentTools, ...extraTools };
+  const builtins: ToolSet = builtinTools
+    ? Object.fromEntries(Object.entries(agentTools).filter(([name]) => builtinTools.includes(name)))
+    : agentTools;
+  const tools: ToolSet = { ...builtins, ...extraTools };
   const apiTools = apiToolSet(tools);
   const systemBlocks = [{ type: "text" as const, text: system }];
 

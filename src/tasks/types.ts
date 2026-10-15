@@ -111,6 +111,8 @@ export interface TaskRecord {
   gateway?: GatewayInfo;
   /** MCP servers selected for this task (absent = the default set: every enabled, eager server). */
   mcp?: string[];
+  /** Built-in tools this task may use (absent = all of them). */
+  builtin_tools?: string[];
 
   created_at: string;
   started_at?: string;
@@ -191,4 +193,11 @@ export interface SubmitRequest {
    * `mcp_tools` / `mcp_call`). See docs/MCP.md.
    */
   mcp?: string[];
+  /**
+   * Allowlist of WrongForge's OWN tools for this task (names from GET /v1/tools).
+   * Omit = all of them. Gateway (`wstack_*`) and MCP tools are not affected, so
+   * an orchestrator can route writes and shell through its own tools:
+   * e.g. ["read","ls","glob","grep","todo_read","todo_write","report_progress"].
+   */
+  builtin_tools?: string[];
 }

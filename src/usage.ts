@@ -65,6 +65,14 @@ function windowOf(limit: UsageLimit | undefined | null): UsageWindow | null {
   };
 }
 
+/** Same-origin rule as the model client: tests/proxies may point elsewhere. */
+function usageUrl(): string {
+  const base = (process.env.ANTHROPIC_BASE_URL ?? "https://api.anthropic.com")
+    .replace(/\/+$/, "")
+    .replace(/\/v\d+$/, "");
+  return `${base}/api/oauth/usage`;
+}
+
 /** Fetches (and caches) the plan usage. Never throws: errors return null. */
 export async function fetchPlanUsage(
   oauth: ClaudeOAuth,
@@ -73,7 +81,7 @@ export async function fetchPlanUsage(
   if (!opts.force && cache && Date.now() - cache.at < CACHE_MS) return cache.value;
   try {
     const token = await oauth.getAccessToken();
-    const res = await fetch("https://api.anthropic.com/api/oauth/usage", {
+    const res = await fetch(usageUrl(), {
       headers: {
         "User-Agent": "claude-cli/2.1.300 (external, sdk-cli)",
         "x-app": "cli",
