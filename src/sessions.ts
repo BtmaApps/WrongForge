@@ -13,6 +13,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ModelMessage } from "ai";
+import { gzipFile } from "./log.js";
 
 const DAY_MS = 86_400_000;
 const MAX_TASK_IDS = 200;
@@ -34,6 +35,16 @@ export interface SessionMeta {
   model?: string;
   /** Workdir of the last turn. */
   workdir?: string;
+  /**
+   * Conversation size in tokens after the last turn (from the API's usage
+   * numbers) — what the next request starts from. Undefined before the first turn.
+   */
+  context_tokens?: number;
+  /** How many times the history was compacted (summarized). */
+  compactions: number;
+  last_compaction_at?: string;
+  /** Set when a request failed because the context was too large; the next task compacts first. */
+  needs_compaction?: boolean;
   /** Last task that ran in this session. */
   last_task_id?: string;
   /** Most recent task ids (capped). */
@@ -75,6 +86,7 @@ export class SessionStore {
       turns: 0,
       message_count: 0,
       title: "",
+      compactions: 0,
       task_ids: [],
     };
     this.writeMeta(meta);
@@ -101,7 +113,7 @@ export class SessionStore {
   appendTurn(
     id: string,
     newMessages: ModelMessage[],
-    info: { task_id: string; model: string; prompt: string },
+    info: { task_id: string; model: string; prompt: string; workdir?: string; context_tokens?: number },
     now = new Date(),
   ): SessionMeta {
     const meta = this.readMeta(id);
@@ -114,9 +126,49 @@ export class SessionStore {
     meta.turns += 1;
     meta.updated_at = now.toISOString();
     meta.model = info.model;
+    if (info.workdir) meta.workdir = info.workdir;
+    if (info.context_tokens) meta.context_tokens = info.context_tokens;
+    meta.needs_compaction = undefined; // a turn that fit proves the context is fine again
     meta.last_task_id = info.task_id;
     meta.task_ids = [...meta.task_ids, info.task_id].slice(-MAX_TASK_IDS);
     if (!meta.title) meta.title = info.prompt.replace(/\s+/g, " ").trim().slice(0, 80);
+    this.writeMeta(meta);
+    return meta;
+  }
+
+  /**
+   * Replaces the stored history (compaction). The previous messages are kept
+   * as `messages.archive-<timestamp>.jsonl.gz` next to it — nothing is lost.
+   * Crash-safe order: write the new file, archive the old, swap, update meta.
+   */
+  async replaceMessages(id: string, next: ModelMessage[], now = new Date()): Promise<{ archive: string; meta: SessionMeta }> {
+    const meta = this.readMeta(id);
+    if (!meta) throw new Error(`no such session: ${id}`);
+    const dir = this.sdir(id);
+    const current = path.join(dir, "messages.jsonl");
+    const stamp = now.toISOString().replace(/[:.]/g, "-");
+    const archivePlain = path.join(dir, `messages.archive-${stamp}.jsonl`);
+
+    const tmp = `${current}.tmp`;
+    fs.writeFileSync(tmp, next.map((m) => JSON.stringify(m)).join("\n") + (next.length ? "\n" : ""));
+    if (fs.existsSync(current)) fs.copyFileSync(current, archivePlain);
+    fs.renameSync(tmp, current);
+    const archive = fs.existsSync(archivePlain) ? await gzipFile(archivePlain) : "";
+
+    meta.message_count = next.length;
+    meta.compactions += 1;
+    meta.last_compaction_at = now.toISOString();
+    meta.context_tokens = undefined; // unknown until the next request measures it
+    meta.needs_compaction = undefined;
+    this.writeMeta(meta);
+    return { archive, meta };
+  }
+
+  /** Small metadata updates (e.g. the needs_compaction flag). */
+  patchMeta(id: string, patch: Partial<Pick<SessionMeta, "needs_compaction" | "context_tokens">>): SessionMeta | null {
+    const meta = this.readMeta(id);
+    if (!meta) return null;
+    Object.assign(meta, patch);
     this.writeMeta(meta);
     return meta;
   }

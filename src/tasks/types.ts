@@ -6,6 +6,7 @@
 import type { TokenUsage } from "../agent.js";
 import type { Todo } from "../tools/todo-state.js";
 import type { CacheMode } from "../cache.js";
+import type { GatewayInfo, GatewaySpec } from "../tools/gateway.js";
 
 /** `queued` and `running` are live; the other four are terminal. */
 export type TaskStatus = "queued" | "running" | "completed" | "failed" | "cancelled" | "timed_out";
@@ -24,6 +25,9 @@ export type TaskErrorCode =
   | "agent_error" //       the model/provider call or the loop failed
   | "max_steps" //         step limit reached before the model finished
   | "max_tokens" //        output limit hit (finish_reason "length")
+  | "context_overflow" //  the conversation does not fit the model's context window
+  | "tool_gateway_unavailable" // the orchestrator's tool API could not be reached for discovery
+  | "mcp_unavailable" //   a `required` MCP server selected for the task could not be reached
   | "server_restarted" //  the server stopped while the task was queued/running
   | "internal_error"; //   bug / unexpected exception
 
@@ -40,6 +44,11 @@ export interface TaskResult {
   steps: number;
   tool_calls: number;
   usage: TokenUsage;
+  /** Conversation size after this task, in tokens (what the next task starts from). */
+  context_tokens: number;
+  context_window: number;
+  /** context_tokens / context_window, 0-100. */
+  context_percent: number;
   duration_ms: number;
 }
 
@@ -98,6 +107,10 @@ export interface TaskRecord {
   context?: unknown;
   callback?: CallbackSpec;
   callback_stats?: CallbackStats;
+  /** Orchestrator-provided tools (secret-free view; token/headers are memory only). */
+  gateway?: GatewayInfo;
+  /** MCP servers selected for this task (absent = the default set: every enabled, eager server). */
+  mcp?: string[];
 
   created_at: string;
   started_at?: string;
@@ -120,6 +133,10 @@ export type TaskEventType =
   | "task.timed_out"
   | "step.started"
   | "step.finished"
+  | "tools.loaded"
+  | "session.compacting"
+  | "session.compacted"
+  | "context.cleared"
   | "agent.text"
   | "agent.report"
   | "agent.todos"
@@ -162,4 +179,16 @@ export interface SubmitRequest {
   system_append?: string;
   context?: unknown;
   callback?: CallbackSpec;
+  /**
+   * Tools provided by the orchestrator over HTTP: discovered (GET list) or
+   * given inline, executed by POSTing each call back. See docs/TOOL-GATEWAY.md.
+   */
+  gateway?: GatewaySpec;
+  /**
+   * Which configured MCP servers get their tools exposed individually for this
+   * task. Omit = every enabled server that is `eager`; ["*"] = every enabled
+   * server; ["github","db"] = exactly these; [] = none (the agent can still use
+   * `mcp_tools` / `mcp_call`). See docs/MCP.md.
+   */
+  mcp?: string[];
 }

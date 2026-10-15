@@ -14,6 +14,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { Todo } from "./tools/todo-state.js";
 import type { CacheMode } from "./cache.js";
+import type { McpRegistry } from "./mcp/registry.js";
 
 /** A semantic progress message the model sends via the `report_progress` tool. */
 export interface ProgressReport {
@@ -36,6 +37,8 @@ export interface TaskContext {
   report?: (r: ProgressReport) => void;
   /** Prompt-cache mode for this task's requests (default: WRONGFORGE_CACHE or "1h"). */
   cache?: CacheMode;
+  /** MCP registry the mcp_* tools use (default: the process-wide one). */
+  mcp?: McpRegistry;
 }
 
 const als = new AsyncLocalStorage<TaskContext>();

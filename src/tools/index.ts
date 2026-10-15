@@ -34,6 +34,7 @@ import { web_fetch } from "./web-fetch.js";
 import { todoRead } from "./todo-read.js";
 import { todoWrite } from "./todo-write.js";
 import { reportProgress } from "./report-progress.js";
+import { mcpServers, mcpAdd, mcpRemove, mcpTools, mcpCall } from "./mcp-tools.js";
 
 export const agentTools = {
   bash,
@@ -47,6 +48,11 @@ export const agentTools = {
   todo_read: todoRead,
   todo_write: todoWrite,
   report_progress: reportProgress,
+  mcp_servers: mcpServers,
+  mcp_add: mcpAdd,
+  mcp_remove: mcpRemove,
+  mcp_tools: mcpTools,
+  mcp_call: mcpCall,
 };
 
 // helpers re-exported for tests and other modules

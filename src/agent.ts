@@ -4,9 +4,10 @@
  * continue — the core Claude Code working pattern.
  */
 
-import { streamText, stepCountIs, type ModelMessage } from "ai";
+import { streamText, stepCountIs, type ModelMessage, type ToolSet } from "ai";
 import type { AnthropicProvider } from "@ai-sdk/anthropic";
 import { agentTools } from "./tools/index.js";
+import { clearOldToolOutputs } from "./compaction.js";
 
 /**
  * Current model lineup — platform.claude.com/docs/en/models/overview (Oct 2026).
@@ -34,6 +35,9 @@ Tools:
 - ls / glob / grep: explore directories, find files by pattern, search contents
 - web_fetch: read a public URL as text
 - todo_read / todo_write: track a multi-step plan
+- report_progress: send a short status update to the orchestrator that started you
+- mcp_servers / mcp_tools / mcp_call: use tools of MCP servers (list servers, discover a server's tools and schemas, call a tool); tools named mcp_<server>_<tool> are the same tools, already typed
+- mcp_add / mcp_remove: add or remove an MCP server (http, sse or stdio) when a task needs a capability you do not have; reference secrets as \${ENV_VAR}, never write them out
 
 Operating principles:
 1. Verify with tools instead of guessing — locate code with glob/grep, then read before editing.
@@ -64,12 +68,27 @@ export interface TurnResult {
   steps: number;
   /** Token usage summed over all steps. */
   usage: TokenUsage;
+  /**
+   * Size of the conversation after this turn, in tokens: the last request's
+   * input (cache included) plus its output. This is what the NEXT request will
+   * start from — the number to watch against the context window.
+   */
+  context_tokens: number;
+}
+
+/** In-task context guard (see compaction.ts). */
+export interface ContextGuard {
+  /** Clear old tool outputs once the live context exceeds this many tokens. */
+  clearAt: number;
+  /** Most recent tool results that are never cleared. */
+  keepToolResults: number;
 }
 
 /** Structured events emitted while a turn runs (used by the HTTP server). */
 export type AgentEvent =
   | { type: "step_start"; step: number }
-  | { type: "step_finish"; step: number; finish_reason: string; usage: TokenUsage }
+  | { type: "step_finish"; step: number; finish_reason: string; usage: TokenUsage; context_tokens: number }
+  | { type: "context_cleared"; cleared: number; context_tokens: number }
   | { type: "text"; delta: string }
   | { type: "tool_call"; id: string; name: string; input: unknown }
   | { type: "tool_result"; id: string; name: string; output: unknown }
@@ -89,19 +108,38 @@ export async function runAgentTurn(
   abortSignal?: AbortSignal,
   onEvent?: (e: AgentEvent) => void,
   system: string = SYSTEM_PROMPT,
+  guard?: ContextGuard,
+  extraTools: ToolSet = {},
 ): Promise<TurnResult> {
   const result = streamText({
     model: provider(modelId),
     system,
     messages: history,
-    tools: agentTools,
+    // built-in tools first (fixed order), then the orchestrator's (sorted by the
+    // gateway) — a stable tool list keeps the prompt cache valid
+    tools: { ...agentTools, ...extraTools },
     stopWhen: stepCountIs(maxSteps),
     abortSignal,
+    // Keeps one long task from outgrowing the context window: the override
+    // carries forward to later steps, so the prefix changes once and is then
+    // stable (and cacheable) again.
+    prepareStep:
+      guard && guard.clearAt > 0
+        ? ({ steps, messages }) => {
+            const used = steps[steps.length - 1]?.usage.inputTokens ?? 0;
+            if (used < guard.clearAt) return {};
+            const r = clearOldToolOutputs(messages, guard.keepToolResults);
+            if (!r.cleared) return {};
+            onEvent?.({ type: "context_cleared", cleared: r.cleared, context_tokens: used });
+            return { messages: r.messages };
+          }
+        : undefined,
   });
 
   let toolCalls = 0;
   let text = "";
   let steps = 0;
+  let contextTokens = 0;
   const usage: TokenUsage = {
     input_tokens: 0, output_tokens: 0, total_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0,
   };
@@ -126,7 +164,10 @@ export async function runAgentTurn(
         usage.total_tokens += u.total_tokens;
         usage.cache_read_tokens += u.cache_read_tokens;
         usage.cache_write_tokens += u.cache_write_tokens;
-        if (onEvent) onEvent({ type: "step_finish", step: steps, finish_reason: String(part.finishReason), usage: u });
+        contextTokens = u.input_tokens + u.output_tokens;
+        if (onEvent) {
+          onEvent({ type: "step_finish", step: steps, finish_reason: String(part.finishReason), usage: u, context_tokens: contextTokens });
+        }
         break;
       }
       case "text-delta":
@@ -170,7 +211,7 @@ export async function runAgentTurn(
 
   // An interrupted turn may end mid tool-call; its partial messages would
   // leave a dangling tool_use in the history, so the caller rolls the turn back.
-  if (abortSignal?.aborted) return { finishReason: "aborted", toolCalls, text, steps, usage };
+  if (abortSignal?.aborted) return { finishReason: "aborted", toolCalls, text, steps, usage, context_tokens: contextTokens };
 
   // Append assistant + tool messages to the history (multi-step context).
   // ai@7: response.messages was removed → result.responseMessages
@@ -183,6 +224,7 @@ export async function runAgentTurn(
     text,
     steps,
     usage,
+    context_tokens: contextTokens,
   };
 }
 

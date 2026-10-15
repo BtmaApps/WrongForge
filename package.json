@@ -18,6 +18,7 @@
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^4.0.80",
+    "@ai-sdk/mcp": "^2.0.76",
     "ai": "^7.0.141",
     "zod": "^4.6.7"
   },

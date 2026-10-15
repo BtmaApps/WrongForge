@@ -28,6 +28,21 @@ import { runInContext, type TaskContext } from "../context.js";
 import type { Logger } from "../log.js";
 import { buildTaskPreamble, buildTaskSystemPrompt } from "../prompt.js";
 import { defaultCacheMode, isCacheMode, type CacheMode } from "../cache.js";
+import { compactMessages, contextConfigFromEnv, isContextOverflow, type ContextConfig } from "../compaction.js";
+import type { LoadedSession } from "../sessions.js";
+import { agentTools } from "../tools/index.js";
+import {
+  GatewayError,
+  GatewayRegistry,
+  allowedGatewayHosts,
+  describeGateway,
+  validateGatewaySpec,
+  type GatewaySpec,
+  type LoadedGateway,
+} from "../tools/gateway.js";
+import type { ToolSet } from "ai";
+import { McpError, defaultMcpRegistry, type McpRegistry } from "../mcp/registry.js";
+import { isValidServerName } from "../mcp/config.js";
 import { SessionStore } from "../sessions.js";
 import { TaskStore, type TaskFilter } from "./store.js";
 import { WebhookDispatcher } from "./webhook.js";
@@ -79,6 +94,14 @@ export interface ManagerOptions {
   progressSaveMs?: number; // default 2 000
   /** Guide directory override (tests). */
   promptDir?: string;
+  /** Context-window management (default: from env, see compaction.ts). */
+  context?: ContextConfig;
+  /** Orchestrator tool gateway (default: a registry with built-in names reserved). */
+  gateways?: GatewayRegistry;
+  /** Hosts a task's `gateway.url` may point to (default: loopback; "*" = any). */
+  gatewayAllowedHosts?: string[];
+  /** MCP client registry (default: the process-wide one on the default config file). */
+  mcp?: McpRegistry;
 }
 
 /** Runtime-only data of a queued/running task. */
@@ -94,6 +117,10 @@ interface Live {
   timedOut?: boolean;
   interrupted?: boolean;
   lastError?: string;
+  /** Gateway incl. token/headers — memory only, never persisted. */
+  gateway?: GatewaySpec;
+  /** Exposed names of the orchestrator-provided tools of this task. */
+  external?: Set<string>;
   done: Promise<void>;
   resolveDone: () => void;
 }
@@ -117,6 +144,10 @@ export class TaskManager {
   private saveTimers = new Map<string, NodeJS.Timeout>();
   private listeners = new Set<(ev: TaskEvent) => void>();
   private closing = false;
+  private readonly ctxCfg: ContextConfig;
+  private readonly gateways: GatewayRegistry;
+  private readonly gatewayHosts: string[];
+  readonly mcp: McpRegistry;
 
   constructor(opts: ManagerOptions) {
     this.o = {
@@ -128,6 +159,16 @@ export class TaskManager {
       textFlushMs: opts.textFlushMs ?? 300,
       progressSaveMs: opts.progressSaveMs ?? 2_000,
     };
+    this.ctxCfg = opts.context ?? contextConfigFromEnv();
+    this.gatewayHosts = opts.gatewayAllowedHosts ?? allowedGatewayHosts();
+    this.mcp = opts.mcp ?? defaultMcpRegistry(opts.logger);
+    this.gateways =
+      opts.gateways ?? new GatewayRegistry({ reservedNames: new Set(Object.keys(agentTools)), logger: opts.logger });
+  }
+
+  /** Effective context-management settings (for /v1/info). */
+  get contextConfig(): ContextConfig {
+    return this.ctxCfg;
   }
 
   // ------------------------------------------------------------------ public
@@ -256,6 +297,30 @@ export class TaskManager {
       if (!o.webhook) bad("callbacks_disabled", "this server has webhooks disabled");
     }
 
+    let gateway: GatewaySpec | undefined;
+    if (req.gateway !== undefined) {
+      try {
+        gateway = validateGatewaySpec(req.gateway, this.gatewayHosts);
+      } catch (e) {
+        if (e instanceof GatewayError) bad(e.code, e.message);
+        throw e;
+      }
+    }
+
+    let mcpSelection: string[] | undefined;
+    if (req.mcp !== undefined) {
+      if (!Array.isArray(req.mcp) || req.mcp.length > 50 || req.mcp.some((n) => typeof n !== "string")) {
+        bad("invalid_request", '`mcp` must be an array of up to 50 server names (or ["*"])');
+      }
+      const known = this.mcp.store.readAll().servers;
+      for (const n of req.mcp) {
+        if (n === "*") continue;
+        if (!isValidServerName(n)) bad("invalid_request", `\`mcp\`: "${n}" is not a valid server name`);
+        if (!known.has(n)) bad("unknown_mcp_server", `\`mcp\`: no MCP server named "${n}" is configured (see GET /v1/mcp/servers)`);
+      }
+      mcpSelection = [...new Set(req.mcp)];
+    }
+
     // ---- session (create when missing)
     let sessionId = req.session_id;
     let sessionCreated = false;
@@ -286,6 +351,8 @@ export class TaskManager {
       ...(req.system_append ? { system_append: req.system_append } : {}),
       ...(req.context !== undefined ? { context: req.context } : {}),
       ...(req.callback ? { callback: { url: req.callback.url, events: req.callback.events }, callback_stats: { delivered: 0, failed: 0 } } : {}),
+      ...(gateway ? { gateway: describeGateway(gateway) } : {}),
+      ...(mcpSelection ? { mcp: mcpSelection } : {}),
       created_at: now,
       progress: { steps: 0, tool_calls: 0, last_event_seq: 0, last_activity_at: now },
     };
@@ -298,7 +365,7 @@ export class TaskManager {
 
     let resolveDone!: () => void;
     const done = new Promise<void>((r) => (resolveDone = r));
-    this.live.set(id, { env, abort: new AbortController(), textBuf: "", done, resolveDone });
+    this.live.set(id, { env, gateway, abort: new AbortController(), textBuf: "", done, resolveDone });
     this.seqs.set(id, 0);
     this.queue.push(id);
     this.emit(id, "task.queued", {
@@ -467,29 +534,13 @@ export class TaskManager {
 
   private async execute(id: string): Promise<void> {
     const o = this.o;
+    const cfg = this.ctxCfg;
     const rec = o.store.get(id)!;
     const live = this.live.get(id)!;
 
     rec.status = "running";
     rec.started_at = new Date().toISOString();
     this.saveNow(rec);
-
-    const session = o.sessions.load(rec.session_id);
-    const base: ModelMessage[] = session?.messages ?? [];
-    this.emit(id, "task.started", {
-      model: rec.model, workdir: rec.workdir, session_id: rec.session_id, session_created: rec.session_created,
-      // set when this session last worked somewhere else (paths in its history may not apply)
-      ...(session?.meta.workdir && dirKey(session.meta.workdir) !== dirKey(rec.workdir)
-        ? { session_workdir_changed_from: session.meta.workdir }
-        : {}),
-      resumed_messages: base.length, max_steps: rec.max_steps, timeout_ms: rec.timeout_ms,
-    });
-
-    // task-specific facts live in the user message so the system prompt (and
-    // with it the cached prefix of the session) stays identical across tasks
-    const userMessage = `${buildTaskPreamble({ taskId: id, cwd: rec.workdir })}\n\n${rec.prompt}`;
-    const history: ModelMessage[] = [...base, { role: "user", content: userMessage }];
-    const mark = base.length;
     const startedAt = Date.now();
 
     live.ctx = {
@@ -498,12 +549,14 @@ export class TaskManager {
       env: live.env,
       todos: [],
       cache: rec.cache,
+      mcp: this.mcp,
       report: (r) => {
         rec.progress.last_report = { ...r, at: new Date().toISOString() };
         this.emit(id, "agent.report", { message: r.message, percent: r.percent, phase: r.phase });
       },
     };
 
+    // Timers start first: heartbeat and timeout also cover compaction and tool discovery.
     live.heartbeat = setInterval(() => {
       this.emit(id, "task.heartbeat", {
         elapsed_ms: Date.now() - startedAt,
@@ -519,23 +572,142 @@ export class TaskManager {
       live.abort.abort();
     }, rec.timeout_ms);
     live.timeout.unref();
+    const stopTimers = (): void => {
+      clearInterval(live.heartbeat);
+      clearTimeout(live.timeout);
+    };
 
-    const system = buildTaskSystemPrompt({ systemAppend: rec.system_append, promptDir: o.promptDir });
+    let session = o.sessions.load(rec.session_id);
+    this.emit(id, "task.started", {
+      model: rec.model, workdir: rec.workdir, session_id: rec.session_id, session_created: rec.session_created,
+      // set when this session last worked somewhere else (paths in its history may not apply)
+      ...(session?.meta.workdir && dirKey(session.meta.workdir) !== dirKey(rec.workdir)
+        ? { session_workdir_changed_from: session.meta.workdir }
+        : {}),
+      resumed_messages: session?.messages.length ?? 0,
+      context_tokens: session?.meta.context_tokens ?? null,
+      cache: rec.cache, max_steps: rec.max_steps, timeout_ms: rec.timeout_ms,
+    });
 
-    let turn: TurnResult | null = null;
-    let thrown: unknown;
+    // ---- 1. keep the session inside the context window (summarize old turns)
     try {
-      turn = await runInContext(live.ctx, () =>
-        runAgentTurn(o.provider, rec.model, history, rec.max_steps, live.abort.signal, (e) => this.onAgentEvent(id, e), system),
-      );
+      session = await this.compactIfNeeded(id, session, false);
     } catch (e) {
-      thrown = e;
+      if (!live.abort.signal.aborted) {
+        o.logger.warn("session.compaction_failed", { task_id: id, session_id: rec.session_id, error: e });
+      }
     }
 
-    clearInterval(live.heartbeat);
-    clearTimeout(live.timeout);
-    this.flushText(id);
+    // ---- 2. tools provided by the orchestrator (WrongStack)
+    let extraTools: ToolSet = {};
+    if (live.gateway && !live.abort.signal.aborted) {
+      try {
+        const loaded: LoadedGateway = await this.gateways.load(
+          live.gateway,
+          { taskId: id, sessionId: rec.session_id, workdir: rec.workdir },
+          live.abort.signal,
+        );
+        extraTools = loaded.tools;
+        if (rec.gateway) rec.gateway.tool_names = loaded.defs.map((d) => d.exposed);
+        this.emit(id, "tools.loaded", {
+          source: live.gateway.tools ? "inline" : "discovery",
+          url: live.gateway.url,
+          count: loaded.defs.length,
+          tools: loaded.defs.map((d) => d.exposed),
+          hash: loaded.hash,
+          cached: loaded.cached,
+          warnings: loaded.warnings,
+        });
+      } catch (e) {
+        if (!live.abort.signal.aborted) {
+          const msg = (e as Error).message;
+          if (live.gateway.optional) {
+            this.emit(id, "tools.loaded", { source: "discovery", url: live.gateway.url, count: 0, tools: [], error: msg, warnings: [] });
+          } else {
+            stopTimers();
+            return this.finalize(id, "failed", { error: { code: "tool_gateway_unavailable", message: msg } });
+          }
+        }
+      }
+    }
+    // ---- 2b. MCP servers: their tools, typed, as mcp_<server>_<tool>
+    if (!live.abort.signal.aborted) {
+      try {
+        const m = await this.mcp.loadForTask(rec.mcp, { taskId: id }, live.abort.signal);
+        if (m.servers.length) {
+          this.emit(id, "tools.loaded", {
+            source: "mcp",
+            servers: m.servers,
+            count: m.defs.length,
+            tools: m.defs.map((d) => d.exposed),
+            hash: m.hash,
+            warnings: m.warnings,
+          });
+        }
+        extraTools = { ...extraTools, ...m.tools };
+      } catch (e) {
+        if (!live.abort.signal.aborted) {
+          if (e instanceof McpError && e.code === "mcp_unavailable") {
+            stopTimers();
+            return this.finalize(id, "failed", { error: { code: "mcp_unavailable", message: e.message } });
+          }
+          // a broken config file must not take every task down: continue without eager MCP tools
+          o.logger.warn("mcp.load_failed", { task_id: id, error: e });
+          this.emit(id, "tools.loaded", { source: "mcp", servers: [], count: 0, tools: [], warnings: [(e as Error).message] });
+        }
+      }
+    }
+    const externalNames = new Set(Object.keys(extraTools));
+    live.external = externalNames;
 
+    // ---- 3. run the turn (one automatic retry after a context overflow)
+    // Task-specific facts live in the user message so the system prompt (and
+    // with it the cached prefix of the session) stays identical across tasks.
+    const userMessage = `${buildTaskPreamble({ taskId: id, cwd: rec.workdir })}\n\n${rec.prompt}`;
+    const system = buildTaskSystemPrompt({ systemAppend: rec.system_append, promptDir: o.promptDir });
+    const guard = { clearAt: cfg.clearAt, keepToolResults: cfg.keepToolResults };
+
+    let history: ModelMessage[] = [];
+    let mark = 0;
+    let turn: TurnResult | null = null;
+    let thrown: unknown;
+    let retried = false;
+    for (;;) {
+      const base: ModelMessage[] = session?.messages ?? [];
+      history = [...base, { role: "user", content: userMessage }];
+      mark = base.length;
+      turn = null;
+      thrown = undefined;
+      live.lastError = undefined;
+      try {
+        turn = await runInContext(live.ctx, () =>
+          runAgentTurn(o.provider, rec.model, history, rec.max_steps, live.abort.signal, (e) => this.onAgentEvent(id, e), system, guard, extraTools),
+        );
+      } catch (e) {
+        thrown = e;
+      }
+      if (live.abort.signal.aborted) break;
+
+      const failedText = String((thrown as Error)?.message ?? live.lastError ?? "");
+      const overflow = (thrown || turn?.finishReason === "error") && isContextOverflow(failedText);
+      // only safe to redo when nothing has been executed yet (no side effects)
+      if (overflow && !retried && rec.progress.tool_calls === 0 && session && session.messages.length > 0) {
+        retried = true;
+        try {
+          const compacted = await this.compactIfNeeded(id, session, true);
+          if (compacted && compacted !== session) {
+            session = compacted;
+            continue;
+          }
+        } catch (e) {
+          o.logger.warn("session.compaction_failed", { task_id: id, session_id: rec.session_id, error: e });
+        }
+      }
+      break;
+    }
+
+    stopTimers();
+    this.flushText(id);
     const durationMs = Date.now() - startedAt;
 
     // ---- classify the outcome
@@ -545,8 +717,17 @@ export class TaskManager {
       }
       return this.finalize(id, live.timedOut ? "timed_out" : "cancelled", {});
     }
-    if (thrown || !turn) {
+    if (thrown || !turn || turn.finishReason === "error") {
       const msg = String((thrown as Error)?.message ?? live.lastError ?? "unknown error").slice(0, 2000);
+      if (isContextOverflow(msg)) {
+        o.sessions.patchMeta(rec.session_id, { needs_compaction: true });
+        return this.finalize(id, "failed", {
+          error: {
+            code: "context_overflow",
+            message: `the conversation does not fit the model's context window (${msg.slice(0, 300)}). The session is marked for compaction: send the task again with the same session_id, or start a new session.`,
+          },
+        });
+      }
       return this.finalize(id, "failed", { error: { code: "agent_error", message: msg } });
     }
 
@@ -556,13 +737,18 @@ export class TaskManager {
       steps: turn.steps,
       tool_calls: turn.toolCalls,
       usage: turn.usage,
+      context_tokens: turn.context_tokens,
+      context_window: cfg.window,
+      context_percent: Math.round((turn.context_tokens / cfg.window) * 1000) / 10,
       duration_ms: durationMs,
     };
 
     const commitable = ["stop", "length", "tool-calls"].includes(turn.finishReason);
     if (commitable) {
       try {
-        o.sessions.appendTurn(rec.session_id, history.slice(mark), { task_id: id, model: rec.model, prompt: rec.prompt });
+        o.sessions.appendTurn(rec.session_id, history.slice(mark), {
+          task_id: id, model: rec.model, prompt: rec.prompt, workdir: rec.workdir, context_tokens: turn.context_tokens,
+        });
       } catch (e) {
         return this.finalize(id, "failed", {
           result,
@@ -587,6 +773,70 @@ export class TaskManager {
     });
   }
 
+  /**
+   * Summarizes the session's old turns when its context is too large (or when
+   * `force`d after an overflow). Returns the (possibly new) loaded session.
+   */
+  private async compactIfNeeded(id: string, session: LoadedSession | null, force: boolean): Promise<LoadedSession | null> {
+    if (!session) return session;
+    const o = this.o;
+    const cfg = this.ctxCfg;
+    const rec = o.store.get(id)!;
+    const live = this.live.get(id)!;
+    const m = session.meta;
+    const reason = force
+      ? "context_overflow"
+      : m.needs_compaction
+        ? "flagged_after_overflow"
+        : cfg.compactAt > 0 && (m.context_tokens ?? 0) >= cfg.compactAt
+          ? "threshold"
+          : null;
+    if (!reason) return session;
+
+    this.emit(id, "session.compacting", {
+      reason, context_tokens: m.context_tokens ?? null, threshold: cfg.compactAt, messages: session.messages.length, keep_turns: cfg.keepTurns,
+    });
+    const res = await compactMessages(o.provider, cfg.summaryModel ?? rec.model, session.messages, cfg.keepTurns, live.abort.signal);
+    if (!res) {
+      this.emit(id, "session.compacted", { compacted: false, note: `nothing to summarize (${cfg.keepTurns} or fewer turns)` });
+      return session;
+    }
+    const { archive } = await o.sessions.replaceMessages(rec.session_id, res.messages);
+    this.emit(id, "session.compacted", {
+      compacted: true,
+      messages_before: res.messages_before,
+      messages_after: res.messages_after,
+      turns_summarized: res.turns_summarized,
+      turns_kept: res.turns_kept,
+      summary_chars: res.summary.length,
+      archive,
+    });
+    return o.sessions.load(rec.session_id);
+  }
+
+  /**
+   * Manual compaction (POST /v1/sessions/:id/compact). Refuses while a task of
+   * the session is queued or running.
+   */
+  async compactSession(
+    sessionId: string,
+    model?: string,
+  ): Promise<{ compacted: boolean; messages_before: number; messages_after: number; turns_summarized: number; archive?: string; meta: unknown }> {
+    const o = this.o;
+    const loaded = o.sessions.load(sessionId);
+    if (!loaded) throw new SubmitError(404, "no_such_session", `no such session: ${sessionId}`);
+    if (this.sessionInUse(sessionId)) throw new SubmitError(409, "session_busy", "a task of this session is queued or running");
+    const res = await compactMessages(o.provider, this.ctxCfg.summaryModel ?? model ?? o.defaultModel, loaded.messages, this.ctxCfg.keepTurns);
+    if (!res) {
+      return { compacted: false, messages_before: loaded.messages.length, messages_after: loaded.messages.length, turns_summarized: 0, meta: loaded.meta };
+    }
+    const { archive, meta } = await o.sessions.replaceMessages(sessionId, res.messages);
+    o.logger.info("session.compacted", {
+      session_id: sessionId, manual: true, messages_before: res.messages_before, messages_after: res.messages_after, archive,
+    });
+    return { compacted: true, messages_before: res.messages_before, messages_after: res.messages_after, turns_summarized: res.turns_summarized, archive, meta };
+  }
+
   private onAgentEvent(id: string, e: AgentEvent): void {
     const rec = this.o.store.get(id)!;
     const live = this.live.get(id)!;
@@ -598,7 +848,10 @@ export class TaskManager {
         break;
       case "step_finish":
         this.flushText(id);
-        this.emit(id, "step.finished", { step: e.step, finish_reason: e.finish_reason, usage: e.usage });
+        this.emit(id, "step.finished", { step: e.step, finish_reason: e.finish_reason, usage: e.usage, context_tokens: e.context_tokens });
+        break;
+      case "context_cleared":
+        this.emit(id, "context.cleared", { cleared: e.cleared, context_tokens: e.context_tokens });
         break;
       case "text":
         live.textBuf += e.delta;
@@ -610,13 +863,18 @@ export class TaskManager {
         if (e.name === "report_progress") break; // surfaced as agent.report by the tool itself
         this.flushText(id);
         rec.progress.current_tool = { id: e.id, name: e.name, started_at: new Date().toISOString() };
-        this.emit(id, "tool.started", { tool_call_id: e.id, name: e.name, input: e.input });
+        this.emit(id, "tool.started", {
+          tool_call_id: e.id, name: e.name, ...(live.external?.has(e.name) ? { external: true } : {}), input: e.input,
+        });
         break;
       case "tool_result": {
         if (e.name === "report_progress") break;
         rec.progress.current_tool = undefined;
         const ok = (e.output as { ok?: unknown } | null)?.ok;
-        this.emit(id, "tool.finished", { tool_call_id: e.id, name: e.name, ...(typeof ok === "boolean" ? { ok } : {}), output: e.output });
+        this.emit(id, "tool.finished", {
+          tool_call_id: e.id, name: e.name, ...(live.external?.has(e.name) ? { external: true } : {}),
+          ...(typeof ok === "boolean" ? { ok } : {}), output: e.output,
+        });
         if (e.name === "todo_write" && ok === true && live.ctx) {
           rec.progress.todos = live.ctx.todos;
           this.emit(id, "agent.todos", { todos: live.ctx.todos });
