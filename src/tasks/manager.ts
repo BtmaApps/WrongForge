@@ -37,6 +37,7 @@ import {
   GatewayRegistry,
   allowedGatewayHosts,
   describeGateway,
+  shadowedBuiltins,
   validateGatewaySpec,
   type GatewaySpec,
   type LoadedGateway,
@@ -208,6 +209,25 @@ export class TaskManager {
 
   events(id: string, after = 0, limit = 1000): TaskEvent[] {
     return this.o.store.readEvents(id, after, limit);
+  }
+
+  /**
+   * The newest task events ACROSS tasks (heartbeats skipped) — the global
+   * SSE feed's backlog replay. Reads the on-disk event logs, so it survives
+   * serve restarts: a dashboard opened late still sees what ran while it was
+   * away, not just what happened since the process started.
+   */
+  recentEvents(limit = 300): TaskEvent[] {
+    const out: TaskEvent[] = [];
+    for (const t of this.o.store.list({ limit: 25 })) {
+      const evs = this.o.store.readEvents(t.id, 0, 5000);
+      for (let i = Math.max(0, evs.length - limit); i < evs.length; i++) {
+        if (evs[i]!.type !== "task.heartbeat") out.push(evs[i]!);
+      }
+      if (out.length >= limit * 4) break; // enough overlap to pick the newest `limit`
+    }
+    out.sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : a.task_id < b.task_id ? -1 : 1));
+    return out.slice(-limit);
   }
 
   /** Live event feed (all tasks). Returns the unsubscribe function. */
@@ -629,6 +649,7 @@ export class TaskManager {
 
     // ---- 2. tools provided by the orchestrator (WrongStack)
     let extraTools: ToolSet = {};
+    let shadowed: string[] = [];
     if (live.gateway && !live.abort.signal.aborted) {
       try {
         const loaded: LoadedGateway = await this.gateways.load(
@@ -638,6 +659,17 @@ export class TaskManager {
         );
         extraTools = loaded.tools;
         if (rec.gateway) rec.gateway.tool_names = loaded.defs.map((d) => d.exposed);
+        // The orchestrator's tools win: `wstack_read` hides the local `read`
+        // so the model cannot route around WrongStack (gateway.shadow_builtins
+        // === false keeps both).
+        if (live.gateway.shadow_builtins !== false) {
+          shadowed = shadowedBuiltins(
+            loaded.defs.map((d) => d.exposed),
+            live.gateway.name_prefix ?? "wstack_",
+            Object.keys(agentTools),
+          );
+          if (shadowed.length) rec.gateway && (rec.gateway.shadowed_builtins = shadowed);
+        }
         this.emit(id, "tools.loaded", {
           source: live.gateway.tools ? "inline" : "discovery",
           url: live.gateway.url,
@@ -645,7 +677,8 @@ export class TaskManager {
           tools: loaded.defs.map((d) => d.exposed),
           hash: loaded.hash,
           cached: loaded.cached,
-          warnings: loaded.warnings,
+          shadowed,
+          warnings: loaded.warnings.concat(shadowed.map((n) => `shadowed built-in "${n}" (use the ${live.gateway!.name_prefix ?? "wstack_"}${n} tool)`)),
         });
       } catch (e) {
         if (!live.abort.signal.aborted) {
@@ -689,6 +722,11 @@ export class TaskManager {
     const externalNames = new Set(Object.keys(extraTools));
     live.external = externalNames;
 
+    /** Shadowed built-ins are removed from whatever allowlist applies. */
+    const effectiveBuiltins = shadowed.length
+      ? (rec.builtin_tools ?? Object.keys(agentTools)).filter((n) => !shadowed.includes(n))
+      : rec.builtin_tools;
+
     // ---- 3. run the turn (one automatic retry after a context overflow)
     // Task-specific facts live in the user message so the system prompt (and
     // with it the cached prefix of the session) stays identical across tasks.
@@ -710,7 +748,7 @@ export class TaskManager {
       live.lastError = undefined;
       try {
         turn = await runInContext(live.ctx, () =>
-          runAgentTurn(o.client, rec.model, history, rec.max_steps, live.abort.signal, (e) => this.onAgentEvent(id, e), system, guard, extraTools, rec.builtin_tools),
+          runAgentTurn(o.client, rec.model, history, rec.max_steps, live.abort.signal, (e) => this.onAgentEvent(id, e), system, guard, extraTools, effectiveBuiltins),
         );
       } catch (e) {
         thrown = e;

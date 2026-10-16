@@ -20,6 +20,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import type { ClaudeOAuth } from "./oauth.js";
 import { PROTOCOL } from "./oauth.js";
@@ -109,8 +110,26 @@ let bootstrappedOnce = false;
 export async function bootstrapSession(oauth: ClaudeOAuth): Promise<void> {
   if (bootstrappedOnce) return;
   bootstrappedOnce = true;
+  await helloPing();
   const uuid = await fetchBootstrap(oauth);
   if (uuid) cachedAccountUuid = uuid;
+}
+
+/**
+ * The startup liveness ping every CC run makes (captured: plain GET, Bun UA,
+ * no auth). Mirrored for shape fidelity; the answer is ignored. Skipped in
+ * test/proxy mode (ANTHROPIC_BASE_URL).
+ */
+async function helloPing(): Promise<void> {
+  if (process.env.ANTHROPIC_BASE_URL) return;
+  try {
+    await globalThis.fetch("https://api.anthropic.com/api/hello", {
+      headers: { "User-Agent": "Bun/1.4.3", Accept: "*/*" },
+      signal: AbortSignal.timeout(3000),
+    });
+  } catch {
+    /* liveness only */
+  }
 }
 
 async function accountUuid(oauth: ClaudeOAuth): Promise<string | null> {
@@ -146,32 +165,48 @@ function applyClientSignature(headers: Headers): void {
   headers.set("x-stainless-os", process.platform === "win32" ? "Windows" : process.platform === "darwin" ? "macOS" : "Linux");
   headers.set("x-stainless-arch", process.arch === "x64" ? "x64" : process.arch);
   headers.set("x-stainless-runtime", "node");
-  headers.set("x-stainless-runtime-version", process.version);
+  // CC 2.1.300 presents itself as node v26.3.0 regardless of the runtime
+  // beneath it (captured live) — pin the trio UA + sdk 0.128.0 + node 26.3.0
+  headers.set("x-stainless-runtime-version", "v26.3.0");
   headers.set("x-stainless-package-version", "0.128.0");
-  headers.set("x-stainless-retry-count", "0");
+  // the SDK maintains this one on its own retries — keep its value
+  if (!headers.has("x-stainless-retry-count")) headers.set("x-stainless-retry-count", "0");
 }
 
 /**
- * Betas sent on every request. Verified live (re/notes, 2026-10-15): the
- * subscription backend classifies a request as a first-party Claude Code
- * client only when BOTH context-management-2025-06-27 and
- * dangerous-tool-use-2026-09-03 are present in the beta header — without
- * them /v1/messages answers 400 "Third-party apps now draw from your extra
- * usage". claude-code marks the client, interleaved-thinking enables the
- * streaming feature the agent relies on, oauth is required for subscription
- * tokens. The rest of CC's 15-beta list is optional (leave-one-out tested).
+ * Betas sent on every /v1/messages request — the EXACT list, in the exact
+ * order, of captured CC 2.1.300 traffic (re/notes/cc-capture.jsonl). The
+ * earlier minimal set worked, but a subset is itself a fingerprint; sending
+ * precisely what the real client sends leaves nothing to diff. Verified
+ * live: without context-management + dangerous-tool-use the backend answers
+ * 400 "Third-party apps now draw from your extra usage"; the others ride
+ * along (leave-one-out tested 2026-10-15).
  */
 const CLAUDE_CODE_BETAS = [
   "claude-code-20250219",
   "oauth-2025-04-20",
   "interleaved-thinking-2025-05-14",
+  "thinking-token-count-2026-05-13",
   "context-management-2025-06-27",
-  "dangerous-tool-use-2026-09-03",
-  // the `effort` request field is gated behind this beta (RE: CC 2.1.300
-  // mod-0422 Wze pushes it whenever effort is sent; without it the endpoint
-  // answers "effort: Extra inputs are not permitted"). CC sends it on every
-  // request, effort or not — matching that is the safest posture.
+  "prompt-caching-scope-2026-01-05",
+  "per-turn-control-2026-07-01",
+  "mid-conversation-tool-changes-2026-07-01",
+  "inline-tools-2026-09-15",
+  "advisor-tool-2026-03-01",
+  "advanced-tool-use-2025-11-20",
   "effort-2025-11-24",
+  "dangerous-tool-use-2026-09-03",
+  "afk-mode-2026-01-31",
+  "extended-cache-ttl-2025-04-11",
+];
+
+/** The count_tokens preflight carries a smaller, fixed beta set (captured). */
+const COUNT_TOKENS_BETAS = [
+  "claude-code-20250219",
+  "oauth-2025-04-20",
+  "interleaved-thinking-2025-05-14",
+  "context-management-2025-06-27",
+  "token-counting-2024-11-01",
 ];
 
 /**
@@ -241,6 +276,7 @@ function withClaudeCodeSystem(
     // it (see effort.ts). Same position in every request, so the cached prefix
     // (tools -> system -> messages) is unaffected.
     applyEffortToBody(body, effectiveEffort(String(body.model ?? "")));
+    applyClaudeCodeRequestShape(body);
     return { input, init: { ...init, body: JSON.stringify(body) } };
   } catch {
     return { input, init };
@@ -252,6 +288,126 @@ function withBetaFlag(input: RequestInfo | URL): RequestInfo | URL {
     return input + (input.includes("?") ? "&" : "?") + "beta=true";
   }
   return input;
+}
+
+// ------------------------------------------- CC request shape (captured 2.1.300)
+// Body fields a real Claude Code /v1/messages call carries that we did not
+// send (all verified in re/notes/cc-capture.jsonl): adaptive thinking, the
+// context-management edit list, the dangerous-tool-use safeguards block, and
+// max_tokens=128000 on main (streaming) turns. Each is dropped individually
+// by the 400 self-heal below when an endpoint refuses it.
+
+let thinkingRejected = false;
+let contextManagementRejected = false;
+let safeguardsRejected = false;
+
+/** C:\Users\x → /c/Users/x — the POSIX-style paths the captured body uses. */
+function posixPath(p: string): string {
+  return p.replace(/\\/g, "/").replace(/^([A-Za-z]):/, (_m, d) => `/${d.toLowerCase()}`);
+}
+
+function applyClaudeCodeRequestShape(body: any): void {
+  if (!body || typeof body !== "object") return;
+  if (!thinkingRejected && body.thinking === undefined) {
+    body.thinking = { type: "adaptive", display: "omitted" };
+  }
+  if (!contextManagementRejected && body.context_management === undefined) {
+    body.context_management = { edits: [{ type: "clear_thinking_20251015", keep: "all" }] };
+  }
+  if (!safeguardsRejected && body.safeguards === undefined) {
+    body.safeguards = [dangerousToolUseSafeguard()];
+  }
+  // main turns: CC asks for the model ceiling (128k), not a mid value
+  if (body.stream === true && typeof body.max_tokens === "number" && body.max_tokens < 128_000) {
+    body.max_tokens = 128_000;
+  }
+}
+
+/** The classifier context CC sends with the dangerous-tool-use beta. */
+function dangerousToolUseSafeguard(): unknown {
+  const cwd = posixPath(currentContext()?.cwd ?? process.cwd());
+  const home = posixPath(os.homedir());
+  return {
+    type: "dangerous_tool_use",
+    classifier_context: {
+      v: 1,
+      permission_mode: "auto",
+      platform: process.platform === "win32" ? "windows" : process.platform === "darwin" ? "macos" : "linux",
+      live_cwd: cwd,
+      home_dir: home,
+      rule_roots: {
+        userSettings: `${home}/.claude`,
+        projectSettings: cwd,
+        localSettings: cwd,
+        flagSettings: cwd,
+        policySettings: cwd,
+        cliArg: cwd,
+        command: cwd,
+        session: cwd,
+        toolsNarrowing: cwd,
+        mcpServerPolicy: cwd,
+        hostCredential: cwd,
+      },
+      trusted_directories: {
+        primary: { path: cwd, resolved: [cwd] },
+        additional: [],
+        network: [],
+        block_reads_outside_working_directories: false,
+      },
+      rules: { allow: [], deny: [], ask: [] },
+      auto_mode: { allow: [], soft_deny: [], hard_deny: [], environment: [] },
+      artifact_consent_holdback: true,
+      case_insensitive_paths: process.platform === "win32",
+      restricted: false,
+      is_remote_mode: false,
+      classify_all_shell: false,
+      user_identity: os.userInfo().username,
+      git_state: {
+        cwd,
+        root: null,
+        branch: null,
+        default_branch: null,
+        status: null,
+        visibility: { origin: null, push_remote: null, remotes: [], visibility_cache: [] },
+        error: "not_a_repo",
+      },
+    },
+  };
+}
+
+/**
+ * The count_tokens preflight CC issues before every main turn (captured 1:1
+ * with /v1/messages): {model, messages, tools} with its own smaller beta
+ * set. Best-effort — the count is informational, failures are ignored.
+ * WRONGFORGE_COUNT_TOKENS=0 disables.
+ */
+async function countTokensPreflight(
+  oauth: ClaudeOAuth,
+  token: string,
+  body: Record<string, unknown>,
+): Promise<void> {
+  if (process.env.WRONGFORGE_COUNT_TOKENS === "0") return;
+  if (process.env.ANTHROPIC_BASE_URL) return; // test/proxy mode: never touch the real API
+  if (typeof body.model !== "string") return;
+  try {
+    await globalThis.fetch("https://api.anthropic.com/v1/messages/count_tokens?beta=true", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        "User-Agent": CLAUDE_CODE_UA,
+        "x-app": "cli",
+        "x-claude-code-session-id": SESSION_ID,
+        "anthropic-beta": COUNT_TOKENS_BETAS.join(","),
+        "anthropic-version": PROTOCOL.anthropicVersion,
+      },
+      body: JSON.stringify({ model: body.model, messages: body.messages, tools: body.tools }),
+      signal: AbortSignal.timeout(10_000),
+    });
+  } catch {
+    /* informational only */
+  }
 }
 
 export function oauthFetch(oauth: ClaudeOAuth): typeof globalThis.fetch {
@@ -278,7 +434,7 @@ export function oauthFetch(oauth: ClaudeOAuth): typeof globalThis.fetch {
       // agent layer leaves it unset and it is injected here, once per process
       // (the account uuid lookup is cached).
       let routedInit = routed.init;
-      if (typeof routed.input === "string" && routed.input.includes("/v1/messages") && typeof routedInit?.body === "string") {
+      if (typeof routed.input === "string" && routed.input.includes("/v1/messages") && !routed.input.includes("count_tokens") && typeof routedInit?.body === "string") {
         try {
           const body = JSON.parse(routedInit.body);
           body.metadata ??= {};
@@ -286,6 +442,8 @@ export function oauthFetch(oauth: ClaudeOAuth): typeof globalThis.fetch {
             body.metadata.user_id = await claudeMetadataUserId(oauth);
             routedInit = { ...routedInit, body: JSON.stringify(body) };
           }
+          // main (streaming) turns: CC counts tokens first, 1:1 (captured)
+          if (body.stream === true) await countTokensPreflight(oauth, token, body);
         } catch {
           /* not a JSON body — leave untouched */
         }
@@ -331,6 +489,23 @@ export function oauthFetch(oauth: ClaudeOAuth): typeof globalThis.fetch {
         console.warn(
           `[effort] ${model || "this backend"} does not accept the effort parameter — retried without it; effort is off for ${model || "all models"} (remembered 7d)`,
         );
+        res = await doFetch();
+      }
+    }
+    // Same self-healing for the captured request-shape fields (thinking /
+    // context_management / safeguards): drop whichever the endpoint names,
+    // retry once, and stop sending it for this process.
+    if (res.status === 400 && (!thinkingRejected || !contextManagementRejected || !safeguardsRejected)) {
+      const detail = await res.clone().text().catch(() => "");
+      const named: string[] = [];
+      if (!thinkingRejected && /thinking/i.test(detail)) named.push("thinking");
+      if (!contextManagementRejected && /context_management/i.test(detail)) named.push("context_management");
+      if (!safeguardsRejected && /safeguards/i.test(detail)) named.push("safeguards");
+      if (named.length) {
+        if (named.includes("thinking")) thinkingRejected = true;
+        if (named.includes("context_management")) contextManagementRejected = true;
+        if (named.includes("safeguards")) safeguardsRejected = true;
+        console.warn(`[shape] ${named.join(", ")} not accepted — retried without it; off for this process`);
         res = await doFetch();
       }
     }

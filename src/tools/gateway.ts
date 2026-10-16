@@ -54,6 +54,12 @@ export interface GatewaySpec {
   call_timeout_ms?: number;
   /** true: if discovery fails, run the task without these tools instead of failing it. */
   optional?: boolean;
+  /**
+   * true (default): an exposed tool named `<prefix><built-in>` (e.g.
+   * `wstack_read`) HIDES that built-in for this task — the orchestrator's
+   * version becomes the only one the model can call. Set false to keep both.
+   */
+  shadow_builtins?: boolean;
 }
 
 /** The persistable, secret-free view of a gateway. */
@@ -71,6 +77,8 @@ export interface GatewayInfo {
   header_names: string[];
   /** Exposed tool names — filled in once discovery has run. */
   tool_names?: string[];
+  /** Built-ins hidden because a `<prefix><name>` gateway tool exists. */
+  shadowed_builtins?: string[];
 }
 
 export interface LoadedDef {
@@ -162,6 +170,7 @@ export function validateGatewaySpec(spec: unknown, allowedHosts: string[]): Gate
     bad(`\`gateway.call_timeout_ms\` must be an integer 1000-${MAX_CALL_TIMEOUT}`);
   }
   if (g.optional !== undefined && typeof g.optional !== "boolean") bad("`gateway.optional` must be a boolean");
+  if (g.shadow_builtins !== undefined && typeof g.shadow_builtins !== "boolean") bad("`gateway.shadow_builtins` must be a boolean");
   if (g.tools !== undefined) {
     if (!Array.isArray(g.tools) || g.tools.length > MAX_TOOLS) bad(`\`gateway.tools\` must be an array of up to ${MAX_TOOLS} tool definitions`);
     for (const t of g.tools) {
@@ -254,6 +263,22 @@ export function normalizeDefs(
 }
 
 /** Stable fingerprint of a tool set. */
+/**
+ * Built-ins hidden by the exposed gateway tools: `wstack_read` hides `read`.
+ * Only exact `<prefix><built-in name>` matches count — `wstack_diff` or
+ * `wstack_codebase-read` shadow nothing.
+ */
+export function shadowedBuiltins(exposed: readonly string[], prefix: string, builtinNames: readonly string[]): string[] {
+  const builtins = new Set(builtinNames);
+  const out = new Set<string>();
+  for (const name of exposed) {
+    if (!name.startsWith(prefix)) continue;
+    const base = name.slice(prefix.length);
+    if (base && builtins.has(base)) out.add(base);
+  }
+  return [...out].sort();
+}
+
 export function toolsHash(defs: LoadedDef[]): string {
   const canon = JSON.stringify(defs.map((d) => [d.exposed, d.description, d.schema]));
   return crypto.createHash("sha256").update(canon).digest("hex").slice(0, 16);

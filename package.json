@@ -1,6 +1,6 @@
 {
   "name": "wrongforge",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "description": "WrongForge — standalone agentic tool that performs Claude Code-style operations for WrongStack (CLI + HTTP API with live tool-call stream), built on the Vercel AI SDK",
@@ -18,7 +18,8 @@
     "webui:build": "npm --prefix webui run build",
     "test": "tsx test/tools.test.ts && tsx test/unit-core.test.ts && tsx test/unit-net.test.ts && tsx test/oauth-mock.test.ts && tsx test/agent-e2e.test.ts && tsx test/tasks-core.test.ts && tsx test/tasks-concurrency.test.ts && tsx test/log.test.ts && tsx test/apikey.test.ts && tsx test/unit-final.test.ts && tsx test/mcp.test.ts && tsx test/cli.test.ts",
     "typecheck": "tsc --noEmit",
-    "coverage": "c8 --no-clean tsx test/tools.test.ts && c8 --no-clean tsx test/unit-core.test.ts && c8 --no-clean tsx test/unit-net.test.ts && tsx test/unit-net.test.ts && c8 --no-clean tsx test/oauth-mock.test.ts && c8 --no-clean tsx test/agent-e2e.test.ts && c8 --no-clean tsx test/tasks-core.test.ts && c8 --no-clean tsx test/tasks-concurrency.test.ts && c8 --no-clean tsx test/log.test.ts && c8 --no-clean tsx test/apikey.test.ts && c8 --no-clean tsx test/unit-final.test.ts && c8 --no-clean tsx test/mcp.test.ts && c8 --no-clean tsx test/cli.test.ts && tsx test/cli.test.ts && c8 report --reporter=text --all --include \"src/**\""
+    "coverage": "c8 --no-clean tsx test/tools.test.ts && c8 --no-clean tsx test/unit-core.test.ts && c8 --no-clean tsx test/unit-net.test.ts && tsx test/unit-net.test.ts && c8 --no-clean tsx test/oauth-mock.test.ts && c8 --no-clean tsx test/agent-e2e.test.ts && c8 --no-clean tsx test/tasks-core.test.ts && c8 --no-clean tsx test/tasks-concurrency.test.ts && c8 --no-clean tsx test/log.test.ts && c8 --no-clean tsx test/apikey.test.ts && c8 --no-clean tsx test/unit-final.test.ts && c8 --no-clean tsx test/mcp.test.ts && c8 --no-clean tsx test/cli.test.ts && tsx test/cli.test.ts && c8 report --reporter=text --all --include \"src/**\"",
+    "build:binary": "node scripts/build-binary.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.134.0",
@@ -30,5 +31,8 @@
     "c8": "^12.0.0",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2"
+  },
+  "bin": {
+    "wrongforge": "./src/main.ts"
   }
 }

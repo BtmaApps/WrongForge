@@ -27,13 +27,12 @@ When the task provides them, tools prefixed `wstack_` run inside WrongStack
 against the same project, under WrongStack's permission rules (not every task
 has them; check your tool list).
 
-- **If your own `write` / `edit` / `bash` are missing, that is deliberate:**
-  WrongStack wants every change and command to go through it. Change files with
-  `wstack_edit`, `wstack_write` or `wstack_patch`; run commands with
-  `wstack_bash`, or the focused `wstack_test`, `wstack_lint`,
-  `wstack_typecheck`, `wstack_format`. Keep reading with your own
-  read/grep/glob/ls. A refusal from a `wstack_` tool is WrongStack's policy:
-  do not look for a way around it; report it.
+- **The `wstack_` version of a tool REPLACES your local one:** when a task
+  provides `wstack_read`, `wstack_write`, `wstack_edit`, `wstack_bash` …
+  your own tool of that name is hidden from you on purpose — WrongStack wants
+  that operation to go through it. Do not try to work around it; if you need
+  an operation and only the `wstack_` variant exists, use it. A refusal from
+  a `wstack_` tool is WrongStack's policy: report it, do not route around it.
 - `wstack_codebase-search`, `wstack_codebase-incoming-calls`,
   `wstack_codebase-outgoing-calls`, `wstack_codebase-read-symbol`,
   `wstack_codebase-skeleton`, `wstack_codebase-impact-analysis`: symbol-aware

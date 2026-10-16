@@ -220,6 +220,28 @@ async function main(): Promise<void> {
   const effOld = (await h2.api("POST", "/v1/tasks", { workdir: dirA, prompt: "[[say e]]", model: "claude-3-opus-20240229", wait: true })).body.task;
   assert(fake.turns().at(-1)!.body.output_config?.effort === undefined && effOld.effort === "high", "a pre-effort model never receives the field (setting kept)");
 
+  // ============================================================ gateway tool shadowing
+  {
+    const gw = (shadow?: boolean) => ({
+      url: "http://127.0.0.1:9",
+      tools: [
+        { name: "read", description: "orchestrator read", input_schema: { type: "object", properties: { path: { type: "string" } } } },
+        { name: "plan", description: "planning helper", input_schema: { type: "object", properties: {} } },
+      ],
+      ...(shadow === false ? { shadow_builtins: false } : {}),
+    });
+    const t1 = (await h2.api("POST", "/v1/tasks", { workdir: dirA, prompt: "[[say s]]", gateway: gw(), wait: true })).body.task;
+    const ev1 = (await h2.api("GET", `/v1/tasks/${t1.id}/events?limit=100`)).body.events.find((e: any) => e.type === "tools.loaded");
+    const tools1 = fake.turns().at(-1)!.body.tools.map((t: any) => t.name);
+    assert(ev1?.data?.shadowed?.join(",") === "read", "wstack_read shadows the local read (tools.loaded event)");
+    assert(tools1.includes("wstack_read") && !tools1.includes("read") && tools1.includes("wstack_plan"), "the model sees wstack_read but not the shadowed local read");
+    assert(t1.gateway?.shadowed_builtins?.[0] === "read", "the task record remembers the shadowing");
+
+    await h2.api("POST", "/v1/tasks", { workdir: dirA, prompt: "[[say s2]]", gateway: gw(false), wait: true });
+    const tools2 = fake.turns().at(-1)!.body.tools.map((t: any) => t.name);
+    assert(tools2.includes("wstack_read") && tools2.includes("read"), "shadow_builtins:false keeps both variants");
+  }
+
   // ============================================================ report_progress + todos
   const rp = (await h2.api("POST", "/v1/tasks", {
     workdir: dirA,
@@ -410,6 +432,35 @@ async function main(): Promise<void> {
       assert(sawReplay, "late-joining SSE subscriber gets the recent-traffic backlog replayed");
       ac2.abort();
       await reading2;
+
+      // task events replay too — from disk, so a dashboard opened after a
+      // serve restart still sees the rounds/tool calls that already ran
+      const done2 = await h4.api("POST", "/v1/tasks", { workdir: dirA, prompt: "[[say replay me]]", wait: true });
+      assert(done2.body.task.status === "completed", "replay-probe task completed");
+      const ac3 = new AbortController();
+      const late2 = await fetch(`${h4.base}/v1/events?key=${h4.key}`, { headers: { Accept: "text/event-stream" }, signal: ac3.signal });
+      const late2Text = { out: "" };
+      const reading3 = (async () => {
+        const reader = late2.body!.getReader();
+        const dec = new TextDecoder();
+        try {
+          for (;;) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            late2Text.out += dec.decode(value, { stream: true });
+          }
+        } catch {
+          /* aborted */
+        }
+      })();
+      let sawEventReplay = false;
+      for (let i = 0; i < 50 && !sawEventReplay; i++) {
+        sawEventReplay = late2Text.out.includes("event: task.completed") && late2Text.out.includes("replay me");
+        if (!sawEventReplay) await sleep(100);
+      }
+      assert(sawEventReplay, "the global feed replays recent task events from disk, not just http traffic");
+      ac3.abort();
+      await reading3;
     } finally {
       await h4.close();
     }

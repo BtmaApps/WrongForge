@@ -64,6 +64,7 @@ Add a `gateway` object to `POST /v1/tasks`. Two ways to provide the tool list:
 | `name_prefix` | string | `wstack_` | Prefix of the names the model sees. `[A-Za-z0-9_]{0,20}`. |
 | `call_timeout_ms` | integer | `120000` | Per-call timeout, 1000–600000. |
 | `optional` | boolean | `false` | `true`: if discovery fails, run the task **without** these tools instead of failing it. |
+| `shadow_builtins` | boolean | `true` | An exposed tool named `<name_prefix><built-in>` (e.g. `wstack_read`) **hides that built-in** for the task — the model can only call the orchestrator's version. `false` keeps both. |
 
 ### Which hosts are allowed
 
@@ -140,6 +141,16 @@ it can retry or change approach.
   as the orchestrator's tool set does not change. Tool definitions are part of
   the prompt-cache prefix; a stable list keeps session caches warm. Changing a
   tool's name, description or schema restarts the cache once.
+
+### Shadowing built-in tools
+
+By default (`shadow_builtins: true`) any gateway tool whose exposed name is
+exactly `<name_prefix>` + a built-in tool name removes that built-in from the
+model's tool list for the task: WrongStack lending `read` means the agent
+cannot fall back to the local `read`. Non-matching names (`wstack_diff`,
+`wstack_codebase-read`) shadow nothing. The `tools.loaded` event lists what
+was hidden in `shadowed`, and the warnings spell it out for the log. An
+explicit `builtin_tools` allowlist is filtered too — shadowing always wins.
 
 ## Events
 

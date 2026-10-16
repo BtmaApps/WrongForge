@@ -40,6 +40,7 @@ import { McpConfigError } from "./mcp/config.js";
 import { McpError } from "./mcp/registry.js";
 import { SessionStore } from "./sessions.js";
 import { startLiveView } from "./liveview.js";
+import { checkForUpdate, cleanupOldBinary, lastUpdateCheck, UPDATE_REPO } from "./update.js";
 
 const MAX_BODY = 1_000_000;
 const TERMINAL_EVENTS = new Set(["task.completed", "task.failed", "task.cancelled", "task.timed_out"]);
@@ -79,8 +80,21 @@ export interface ServerOptions {
   webuiDir?: string;
 }
 
-/** Where `npm run webui:build` drops the dashboard (next to src/, not cwd). */
-const DEFAULT_WEBUI_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "webui", "dist");
+  /** Where `npm run webui:build` drops the dashboard (next to src/, not cwd). */
+  const DEFAULT_WEBUI_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "webui", "dist");
+
+  /**
+   * The dashboard embedded in the compiled binary (src/embedded-webui.ts,
+   * packed by `npm run build:binary`). Empty in a source checkout — the stub
+   * exists only so this module loads without webui/dist.
+   */
+  let embeddedWebuiPromise: Promise<Record<string, string>> | null = null;
+  const embeddedWebui = (): Promise<Record<string, string>> => {
+    embeddedWebuiPromise ??= import("./embedded-webui.js")
+      .then((m) => m.EMBEDDED_WEBUI as Record<string, string>)
+      .catch(() => ({}));
+    return embeddedWebuiPromise;
+  };
 
 const MIME: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -144,46 +158,63 @@ export function createAgentServer(opts: ServerOptions): http.Server {
   startLiveView({ events: manager, httpTaps });
 
   /**
-   * Serves the built dashboard (public shell — the data still needs the API
-   * key). Client-side routes fall back to index.html; traversal is refused.
-   * Returns false when the path is not servable.
+   * Serves the dashboard: the built webui/dist when present (dev), else the
+   * copy embedded in the compiled binary. Client-side routes fall back to
+   * index.html; traversal is refused (embedded assets are map lookups, so
+   * only real keys resolve). Returns false when the path is not servable.
    */
-  const serveWebui = (res: http.ServerResponse, pathname: string): boolean => {
-    if (!webuiBuilt()) {
-      if (pathname === "/" || pathname === "/index.html") {
-        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-        res.end(NOT_BUILT_PAGE);
+  const serveWebui = async (res: http.ServerResponse, pathname: string): Promise<boolean> => {
+    if (webuiBuilt()) {
+      let file = path.resolve(webuiDir, "." + decodeURIComponent(pathname));
+      if (file !== path.resolve(webuiDir) && !file.startsWith(path.resolve(webuiDir) + path.sep)) {
+        return false; // traversal — not ours to serve
+      }
+      try {
+        const stat = fs.statSync(file);
+        if (!stat.isFile()) throw new Error("not a file");
+        const ext = path.extname(file).toLowerCase();
+        res.writeHead(200, {
+          "Content-Type": MIME[ext] ?? "application/octet-stream",
+          "Content-Length": stat.size,
+          "Cache-Control": ext === ".html" ? "no-cache" : "public, max-age=3600",
+        });
+        fs.createReadStream(file).pipe(res);
+        return true;
+      } catch {
+        // SPA fallback: a deep link like /tasks/xyz has no file — the app routes it
+        const index = path.join(webuiDir, "index.html");
+        const stat = fs.statSync(index); // exists per webuiBuilt()
+        res.writeHead(200, {
+          "Content-Type": "text/html; charset=utf-8",
+          "Content-Length": stat.size,
+          "Cache-Control": "no-cache",
+        });
+        fs.createReadStream(index).pipe(res);
         return true;
       }
-      return false;
     }
-    let file = path.resolve(webuiDir, "." + decodeURIComponent(pathname));
-    if (file !== path.resolve(webuiDir) && !file.startsWith(path.resolve(webuiDir) + path.sep)) {
-      return false; // traversal — not ours to serve
-    }
-    try {
-      const stat = fs.statSync(file);
-      if (!stat.isFile()) throw new Error("not a file");
-      const ext = path.extname(file).toLowerCase();
+    // compiled binary: serve the embedded copy (keyed lookups — only real
+    // asset paths resolve, so traversal cannot escape the map)
+    const embedded = await embeddedWebui();
+    if (embedded["index.html"]) {
+      const key = decodeURIComponent(pathname).replace(/^\/+/, "");
+      const rel = embedded[key] !== undefined ? key : "index.html"; // SPA fallback
+      const ext = path.extname(rel).toLowerCase();
+      const body = embedded[rel]!;
       res.writeHead(200, {
         "Content-Type": MIME[ext] ?? "application/octet-stream",
-        "Content-Length": stat.size,
+        "Content-Length": Buffer.byteLength(body),
         "Cache-Control": ext === ".html" ? "no-cache" : "public, max-age=3600",
       });
-      fs.createReadStream(file).pipe(res);
-      return true;
-    } catch {
-      // SPA fallback: a deep link like /tasks/xyz has no file — the app routes it
-      const index = path.join(webuiDir, "index.html");
-      const stat = fs.statSync(index); // exists per webuiBuilt()
-      res.writeHead(200, {
-        "Content-Type": "text/html; charset=utf-8",
-        "Content-Length": stat.size,
-        "Cache-Control": "no-cache",
-      });
-      fs.createReadStream(index).pipe(res);
+      res.end(body);
       return true;
     }
+    if (pathname === "/" || pathname === "/index.html") {
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(NOT_BUILT_PAGE);
+      return true;
+    }
+    return false;
   };
 
   /**
@@ -416,10 +447,13 @@ export function createAgentServer(opts: ServerOptions): http.Server {
     const taskFilter = url.searchParams.get("task_id");
     const sessionFilter = url.searchParams.get("session_id");
     sseStart(res);
-    // Backlog first: the recent-traffic ring, so a dashboard opened late sees
-    // the requests that already happened. Everything below is synchronous —
-    // no live frame can fall into the gap before the subscriptions attach.
+    // Backlog first: the recent-traffic ring AND the newest task events from
+    // disk (the agent's rounds, tool calls, texts — heartbeats skipped), so a
+    // dashboard opened late — or after a serve restart — immediately sees
+    // what ran while it was away. Everything below is synchronous — no live
+    // frame can fall into the gap before the subscriptions attach.
     for (const e of httpTapLog) res.write(`event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`);
+    for (const ev of manager.recentEvents()) res.write(`event: ${ev.type}\ndata: ${JSON.stringify(ev)}\n\n`);
     const unsub = manager.subscribe((ev) => {
       if (taskFilter && ev.task_id !== taskFilter) return;
       if (sessionFilter && ev.session_id !== sessionFilter) return;
@@ -473,6 +507,8 @@ export function createAgentServer(opts: ServerOptions): http.Server {
       context: { window: ctx.window, compact_at: ctx.compactAt, clear_at: ctx.clearAt, keep_turns: ctx.keepTurns },
       cache: { default: process.env.WRONGFORGE_CACHE || "1h", modes: ["5m", "1h", "off"] },
       effort: { default: process.env.WRONGFORGE_EFFORT || "high", levels: ["low", "medium", "high", "xhigh", "max", "off"] },
+      /** A newer GitHub release was seen at startup / by the periodic check. */
+      update: lastUpdateCheck(),
       limits: { max_body_bytes: MAX_BODY, max_steps: 500, default_max_steps: 50 },
       webhook: { signature: "HMAC-SHA256 over '<timestamp>.<body>', header X-WrongForge-Signature: sha256=<hex>", key: process.env.WRONGFORGE_WEBHOOK_SECRET ? "WRONGFORGE_WEBHOOK_SECRET" : "the API key" },
       tools: Object.keys(agentTools),
@@ -601,7 +637,7 @@ export function createAgentServer(opts: ServerOptions): http.Server {
     // The dashboard shell is public (its data still requires the key below);
     // everything under /v1 stays API-only.
     if (method === "GET" && parts[0] !== "v1") {
-      if (serveWebui(res, url.pathname)) return;
+      if (await serveWebui(res, url.pathname)) return;
       if (url.pathname === "/") {
         res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
         res.end("WrongForge API — see /v1/info. Dashboard: npm run webui:build\n");
@@ -735,6 +771,7 @@ export interface EnvServer {
  * suite can run the real entry in-process (and shut it down cleanly).
  */
 export async function startEnvServer(): Promise<EnvServer> {
+  cleanupOldBinary(); // remove a binary renamed aside by the previous update
   const resolved = resolveApiKey(); // env -> saved file -> generate + save
   const oauth = new ClaudeOAuth(process.env.CLAUDE_TOKEN_STORE || undefined);
   const host = process.env.HOST || "127.0.0.1";
@@ -776,6 +813,18 @@ export async function startEnvServer(): Promise<EnvServer> {
       if (fs.existsSync(path.join(DEFAULT_WEBUI_DIR, "index.html"))) {
         console.log(`  dashboard:   http://${host}:${port}/`);
       }
+      // release check (off with WRONGFORGE_UPDATE_CHECK=0): one at startup,
+      // then daily — the banner, the log and /v1/info all surface the result
+      const announceUpdate = (): void => {
+        void checkForUpdate().then((u) => {
+          if (!u) return;
+          console.log(`  update:      v${u.latest} available (running v${u.current}) — ${u.url}`);
+          console.log(`               run \`wrongforge update\` to install it`);
+          app.logger.info("update.available", { current: u.current, latest: u.latest, repo: UPDATE_REPO });
+        });
+      };
+      announceUpdate();
+      setInterval(announceUpdate, 24 * 3600 * 1000).unref();
       resolveListen();
     });
   });

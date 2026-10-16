@@ -130,7 +130,8 @@ function apiToolSet(tools: ToolSet): Anthropic.Messages.Tool[] {
 
 // ----------------------------------------------------------------- agent turn
 
-const MAX_OUTPUT_TOKENS = 32_000;
+// CC 2.1.300 asks for the model ceiling on main turns (captured: 128000)
+const MAX_OUTPUT_TOKENS = 128_000;
 
 /**
  * Runs one agent turn. Without `onEvent` it prints to the terminal (REPL);

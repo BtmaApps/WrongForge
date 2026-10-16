@@ -27,6 +27,8 @@ import {
 } from "./effort.js";
 import { fetchModelList } from "./models.js";
 import { fetchPlanUsage, usageLine } from "./usage.js";
+import { VERSION } from "./paths.js";
+import { selfUpdate, UPDATE_REPO } from "./update.js";
 import * as crypto from "node:crypto";
 
 const HELP = `
@@ -56,6 +58,28 @@ const effortLine = (model: string): string => {
 export async function main(argv: string[] = process.argv.slice(2)): Promise<void> {
   const args = argv;
   const cmd = args[0] ?? "chat";
+
+  // ---- binary commands (the compiled executable is this same entry point)
+  if (cmd === "serve") {
+    const { startEnvServer } = await import("./server.js");
+    await startEnvServer();
+    return;
+  }
+  if (cmd === "version" || cmd === "--version" || cmd === "-v") {
+    console.log(`WrongForge ${VERSION} · https://github.com/${UPDATE_REPO}`);
+    return;
+  }
+  if (cmd === "update") {
+    try {
+      const message = await selfUpdate();
+      console.log(message);
+    } catch (e) {
+      console.error(String((e as Error).message));
+      process.exit(1);
+    }
+    return;
+  }
+
   const oauth = new ClaudeOAuth(
     process.env.CLAUDE_TOKEN_STORE || undefined,
   );

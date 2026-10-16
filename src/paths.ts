@@ -13,15 +13,12 @@ import * as os from "node:os";
 
 export const APP_NAME = "WrongForge";
 
-/** Version from package.json ("0.0.0" if it cannot be read). */
-export const VERSION: string = (() => {
-  try {
-    const pkg = path.join(import.meta.dirname ?? ".", "..", "package.json");
-    return String(JSON.parse(fs.readFileSync(pkg, "utf8")).version ?? "0.0.0");
-  } catch {
-    return "0.0.0";
-  }
-})();
+// Imported (not fs-read) so Bun's --compile embeds the version into the
+// binary — a compiled executable has no package.json next to it.
+import pkg from "../package.json" with { type: "json" };
+
+/** Version from package.json. */
+export const VERSION: string = String((pkg as { version?: string }).version ?? "0.0.0");
 const DIR_NAME = ".wrongforge";
 const LEGACY_DIR_NAME = ".wrongminiagent";
 

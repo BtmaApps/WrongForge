@@ -50,6 +50,11 @@ export function TopBar() {
 
       {info && (
         <div className="topbar-chips">
+          {info.update && (
+            <Tip text={`new release · ${info.update.url} — run \`wrongforge update\` on the server`}>
+              <Chip label="update" value={`v${info.update.latest} available`} tone="tone-red" />
+            </Tip>
+          )}
           <Tip text={`effort ${info.effort.default} · tools ${info.tools.length} · ${info.mcp.servers} MCP servers`}>
             <Chip label="model" value={info.default_model} />
           </Tip>

@@ -97,11 +97,12 @@ Tips:
   `current_tool`, `last_report`, `todos`) if you only need status.
 - Use `cancel_on_disconnect: true` with `wait`/`stream` when the caller going
   away should also stop the work.
-- The **global feed** also carries `http.request` frames — every API call the
-  server handles, live (`{ts, method, path, status, duration_ms}`, never
-  persisted). On connect you first receive a replay of the last ≤300 frames as
-  a backlog burst; they carry their original timestamps, so order by `ts`, and
-  ignore the family entirely if you only care about task events.
+- The **global feed** replays its backlog on every connect: the last ≤300
+  `http.request` frames (in-memory) AND the newest ≤300 task events read
+  **from disk** — rounds, tool calls, texts, heartbeats skipped. The event
+  replay survives serve restarts, so connecting late still shows what ran
+  while you were away; frames carry original timestamps, so order by `ts`.
+  Ignore `http.request` entirely if you only care about task events.
 
 ## Models and reasoning effort
 

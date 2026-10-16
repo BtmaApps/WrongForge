@@ -1,0 +1,69 @@
+name: release
+
+# Tag a version (git tag v0.4.0 && git push --tags) → both platforms build a
+# single-file executable and attach them to a GitHub Release. `wrongforge
+# update` on a machine downloads exactly these assets (name pattern:
+# wrongforge-<os>-<arch>[.exe] — keep scripts/build-binary.mjs in sync).
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows
+            arch: x64
+          - os: ubuntu-latest
+            platform: linux
+            arch: x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install deps (root + webui)
+        run: |
+          npm ci
+          npm --prefix webui ci
+
+      - name: Build binary (webui + embed + bun compile)
+        run: npm run build:binary
+        env:
+          BUN: bun
+
+      - name: sha256
+        shell: bash
+        run: |
+          cd release
+          sha256sum wrongforge-* | tee SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wrongforge-${{ matrix.platform }}-${{ matrix.arch }}
+          path: release/*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true

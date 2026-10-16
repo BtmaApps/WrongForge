@@ -99,6 +99,9 @@ class Store {
   private usageTimer: ReturnType<typeof setInterval> | null = null;
   private seeded = false;
   private httpSeq = 0;
+  /** Feed keys already shown — the SSE backlog replays past events, and the
+   * same event must not land twice (replay + live). */
+  private feedKeys = new Set<string>();
 
   getState = (): State => this.state;
 
@@ -213,7 +216,9 @@ class Store {
       const have = new Set(s.feed.map((r) => r.key));
       const merged = [...rows.filter((r) => !have.has(r.key)), ...s.feed];
       merged.sort((a, b) => a.at - b.at);
-      return { feed: merged.slice(-FEED_CAP) };
+      const feed = merged.slice(-FEED_CAP);
+      for (const r of feed) this.feedKeys.add(r.key);
+      return { feed };
     });
   }
 
@@ -349,9 +354,15 @@ class Store {
   }
 
   applyEvent(ev: TaskEvent): void {
-    const at = Date.now();
+    const key = `${ev.task_id}:${ev.seq}`;
+    if (this.feedKeys.has(key)) return; // already replayed via the backlog
+    if (this.feedKeys.size > 4_000) this.feedKeys.clear();
+    this.feedKeys.add(key);
+    const at = Date.parse(ev.ts) || Date.now(); // backlog frames arrive with their real ts
+    const seen = at; // activity watermark (replay keeps idle honest)
     this.set((s) => {
-      const feed = [...s.feed, { key: `${ev.task_id}:${ev.seq}`, at, ev }];
+      const feed = [...s.feed, { key, at, ev }];
+      feed.sort((a, b) => a.at - b.at); // replayed backlog can be older than live rows
       const perTask = new Map(s.perTask);
       perTask.set(ev.task_id, [...(perTask.get(ev.task_id) ?? []), ev].slice(-PER_TASK_CAP));
 
@@ -430,7 +441,8 @@ class Store {
         }
       }
 
-      return { feed: feed.slice(-FEED_CAP), perTask, tasks, tools, totals, pulses, lastActivityAt: at };
+      // replayed backlog keeps the idle counter honest (last event's real ts)
+      return { feed: feed.slice(-FEED_CAP), perTask, tasks, tools, totals, pulses, lastActivityAt: Math.max(s.lastActivityAt, at) };
     });
   }
 }

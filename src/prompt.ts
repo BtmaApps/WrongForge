@@ -14,6 +14,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { SYSTEM_PROMPT } from "./agent.js";
+import { EMBEDDED_PROMPTS } from "./embedded-webui.js";
 
 /** Default prompt directory: `WRONGFORGE_PROMPT_DIR` or `<repo>/prompts`. */
 export function promptDir(): string {
@@ -25,15 +26,20 @@ export interface PromptFile {
   content: string;
 }
 
-/** Reads the guide files; a missing directory simply yields none. */
+/**
+ * Reads the guide files; a missing directory simply yields none. Guides
+ * embedded in the compiled binary are appended when the disk does not have
+ * a file of the same name (disk wins), so a checkout and a bare executable
+ * see the same defaults.
+ */
 export function loadPromptFiles(dir: string = promptDir()): PromptFile[] {
   let names: string[];
   try {
     names = fs.readdirSync(dir);
   } catch {
-    return [];
+    names = [];
   }
-  return names
+  const files: PromptFile[] = names
     .filter((n) => n.endsWith(".md") && !n.startsWith("_") && n.toLowerCase() !== "readme.md")
     .sort()
     .map((name) => {
@@ -44,6 +50,11 @@ export function loadPromptFiles(dir: string = promptDir()): PromptFile[] {
       }
     })
     .filter((f) => f.content.length > 0);
+  for (const [name, content] of Object.entries(EMBEDDED_PROMPTS)) {
+    if (content.trim() && !names.includes(name)) files.push({ name, content: content.trim() });
+  }
+  files.sort((a, b) => a.name.localeCompare(b.name));
+  return files;
 }
 
 export interface TaskPromptInput {

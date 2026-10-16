@@ -114,6 +114,8 @@ export interface Info {
   limits: { max_body_bytes: number; max_steps: number; default_max_steps: number };
   webhook: { signature: string; key: string };
   dirs: { home: string; logs: string; tasks: string; sessions: string };
+  /** A newer GitHub release was seen by the server's check; null = current. */
+  update?: { current: string; latest: string; url: string; notes: string } | null;
 }
 
 export const TERMINAL: TaskStatus[] = ["completed", "failed", "cancelled", "timed_out"];
