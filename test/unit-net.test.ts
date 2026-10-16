@@ -29,6 +29,11 @@ const assert = (cond: boolean, label: string): void => {
 };
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "wrongforge-net-"));
+// Refresh tests use local token endpoints and must not inherit a developer's
+// OAuth configuration (a clean CI runner has no ~/.wrongforge/oauth.json).
+process.env.WRONGFORGE_HOME = path.join(tmp, "home");
+process.env.CLAUDE_OAUTH_CONFIG = path.join(tmp, "oauth-config.json");
+process.env.CLAUDE_OAUTH_CLIENT_ID = "unit-net-client";
 process.on("exit", () => fs.rmSync(tmp, { recursive: true, force: true }));
 
 function listen(server: http.Server): Promise<number> {

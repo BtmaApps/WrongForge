@@ -154,7 +154,7 @@ async function main(): Promise<void> {
   const legacy = path.join(fakeHome, ".wrongminiagent");
   fs.mkdirSync(legacy, { recursive: true });
   fs.writeFileSync(path.join(legacy, "legacy-marker.txt"), "x");
-  const env3: Record<string, string> = { USERPROFILE: fakeHome, HOMEPATH: "", HOMEDRIVE: "", WRONGFORGE_HOME: "" };
+  const env3: Record<string, string> = { USERPROFILE: fakeHome, HOME: fakeHome, HOMEPATH: "", HOMEDRIVE: "", WRONGFORGE_HOME: "" };
   const r3 = await run("src/init-config.ts", [], { env: env3 });
   assert(r3.code === 0 && fs.existsSync(path.join(fakeHome, ".wrongforge", "oauth.json")), "legacy .wrongminiagent migrated to .wrongforge");
   assert(fs.existsSync(path.join(legacy, "legacy-marker.txt")), "legacy dir left in place");
