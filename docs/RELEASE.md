@@ -27,7 +27,7 @@ git push --follow-tags
 
 Pushing a `v*` tag runs `.github/workflows/release.yml`: Windows + Linux
 builds, sha256 checksums, assets attached to a GitHub Release
-(`ersinkoc/WrongForge`). Asset names are the contract `wrongforge update`
+(`WrongStack/WrongForge`). Asset names are the contract `wrongforge update`
 downloads — `wrongforge-<os>-<arch>[.exe]` (see `scripts/build-binary.mjs`).
 
 ## Binary commands

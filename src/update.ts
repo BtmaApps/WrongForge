@@ -17,7 +17,7 @@ import * as path from "node:path";
 import { spawn } from "node:child_process";
 import { VERSION } from "./paths.js";
 
-export const UPDATE_REPO = process.env.WRONGFORGE_UPDATE_REPO || "ersinkoc/WrongForge";
+export const UPDATE_REPO = process.env.WRONGFORGE_UPDATE_REPO || "WrongStack/WrongForge";
 
 export interface UpdateAvailable {
   current: string;
