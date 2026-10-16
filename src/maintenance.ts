@@ -68,6 +68,28 @@ export interface MaintenanceSummary {
 
 /** One housekeeping pass. Never throws; failures are reported inside the summary / log. */
 export async function runMaintenance(d: MaintenanceDeps): Promise<MaintenanceSummary> {
+  // A pass can outlast the interval (many logs, a slow disk, an on-demand run
+  // overlapping a tick), and every entry point reaches this function: the
+  // scheduler tick AND `POST /v1/maintenance/run`. Overlapping passes would
+  // compress the same log file into the same <file>.gz.tmp at once, so a caller
+  // that arrives while a pass is running joins that pass instead of starting a
+  // second one. Keyed by log directory: one home = one pass at a time.
+  const key = d.logger.dir;
+  const running = inFlight.get(key);
+  if (running) return running;
+
+  const p = maintenancePass(d);
+  inFlight.set(key, p);
+  const forget = (): void => {
+    if (inFlight.get(key) === p) inFlight.delete(key);
+  };
+  p.then(forget, forget);
+  return p;
+}
+
+const inFlight = new Map<string, Promise<MaintenanceSummary>>();
+
+async function maintenancePass(d: MaintenanceDeps): Promise<MaintenanceSummary> {
   const started = Date.now();
   const r = d.retention;
   const empty = { compressed: [], deleted: [], errors: [] };
@@ -127,11 +149,22 @@ export async function runMaintenance(d: MaintenanceDeps): Promise<MaintenanceSum
  */
 export function startMaintenance(d: MaintenanceDeps): () => void {
   const timers: NodeJS.Timeout[] = [];
-  const first = setTimeout(() => void runMaintenance(d), 5_000);
+  // A pass can outlast the interval (many logs, a slow disk, an on-demand run
+  // overlapping a tick). Overlapping passes would compress the same log file
+  // into the same <file>.gz.tmp at once, so skip the tick instead.
+  let running = false;
+  const tick = (): void => {
+    if (running) return;
+    running = true;
+    void runMaintenance(d).finally(() => {
+      running = false;
+    });
+  };
+  const first = setTimeout(tick, 5_000);
   first.unref();
   timers.push(first);
   if (d.retention.intervalMinutes > 0) {
-    const t = setInterval(() => void runMaintenance(d), d.retention.intervalMinutes * 60_000);
+    const t = setInterval(tick, d.retention.intervalMinutes * 60_000);
     t.unref();
     timers.push(t);
   }

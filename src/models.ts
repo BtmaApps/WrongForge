@@ -1,6 +1,8 @@
 /**
  * Live model list — GET {api}/v1/models (Anthropic Models API).
- * Uses the same OAuth signing scheme: Bearer + anthropic-beta + anthropic-version.
+ * With an OAuth session it uses the same OAuth signing scheme: Bearer +
+ * anthropic-beta + anthropic-version; with ANTHROPIC_API_KEY it is a plain
+ * API-key request, like every other call in that mode.
  * This keeps the app correct even when the static list goes stale.
  */
 
@@ -23,7 +25,18 @@ export async function fetchModelList(
   oauth: ClaudeOAuth,
 ): Promise<{ ok: true; models: ModelEntry[] } | { ok: false; error: string }> {
   try {
-    const token = await oauth.getAccessToken();
+    // Same credential choice as createClaudeClient (provider.ts): an API key
+    // bypasses OAuth entirely, so asking the OAuth client for a token here
+    // would leave the documented "alternative without OAuth" setup unable to
+    // list models at all.
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    const headers: Record<string, string> = apiKey
+      ? { "x-api-key": apiKey, "anthropic-version": PROTOCOL.anthropicVersion }
+      : {
+          authorization: `Bearer ${await oauth.getAccessToken()}`,
+          "anthropic-beta": PROTOCOL.oauthBeta,
+          "anthropic-version": PROTOCOL.anthropicVersion,
+        };
     const models: ModelEntry[] = [];
     let after: string | undefined;
     // pagination: has_more / first_id-last_id
@@ -31,13 +44,7 @@ export async function fetchModelList(
       const url = new URL(`${apiBase()}/v1/models`);
       url.searchParams.set("limit", "100");
       if (after) url.searchParams.set("after_id", after);
-      const res = await fetch(url, {
-        headers: {
-          authorization: `Bearer ${token}`,
-          "anthropic-beta": PROTOCOL.oauthBeta,
-          "anthropic-version": PROTOCOL.anthropicVersion,
-        },
-      });
+      const res = await fetch(url, { headers });
       if (res.status !== 200) {
         const text = await res.text();
         return { ok: false, error: `HTTP ${res.status}: ${text.slice(0, 200)}` };

@@ -476,9 +476,44 @@ async function main(): Promise<void> {
     }
   }
 
+  // ==================================================== event-log integrity (F101)
+  // A failed durable append must never punch a hole in events.jsonl: `seq` is
+  // documented as strictly increasing and gap-free, and every seq handed to a
+  // live subscriber or a webhook must stay replayable from the log.
+  {
+    const h6 = await startHarness({ fake });
+    try {
+      const d6 = h6.mkdir("seqgap");
+      const store = h6.app.taskStore as unknown as { appendEvent: (ev: unknown) => void };
+      const append = store.appendEvent.bind(store);
+      const seen: number[] = [];
+      h6.app.manager.subscribe((ev: { seq: number }) => seen.push(ev.seq));
+      let armed = false;
+      store.appendEvent = (ev: unknown) => {
+        if (!armed && (ev as { type: string }).type === "step.started") {
+          armed = true;
+          throw new Error("injected: ENOSPC (no space left on device)");
+        }
+        return append(ev);
+      };
+      const t6 = (await h6.api("POST", "/v1/tasks", { workdir: d6, prompt: `${tool("ls", { path: "." })} [[say gap]]` })).body.task;
+      const done6 = await h6.waitTask(t6.id);
+      await sleep(250);
+      assert(armed, "the injected append failure was actually reached");
+      assert(done6.status === "completed", `the task still completes when one append fails (${done6.status})`);
+      const logged = ((await h6.events(t6.id)) as { seq: number }[]).map((e) => e.seq);
+      assert(logged.length > 5, `the task produced a real event log (${logged.length} events)`);
+      assert(logged[0] === 1 && logged.every((s, i) => i === 0 || s === logged[i - 1]! + 1), `events.jsonl stays gap-free from 1 after a failed append: ${logged.join(",")}`);
+      assert(seen.every((s) => logged.includes(s)), "no seq reaches a subscriber that the log could never replay");
+      assert(done6.progress.last_event_seq === logged.length, `progress.last_event_seq matches the log (${done6.progress.last_event_seq} vs ${logged.length})`);
+    } finally {
+      await h6.close();
+    }
+  }
+
   await h3.close();
   await fake.close();
-  console.log("TASKS CORE TESTS PASSED ✓ (auth, validation, lifecycle, events, idempotency, wait/stream/replay/long-poll, sessions, cache prefix stability, restart continuity, recovery, maintenance, dashboard)");
+  console.log("TASKS CORE TESTS PASSED ✓ (auth, validation, lifecycle, events, idempotency, wait/stream/replay/long-poll, sessions, cache prefix stability, restart continuity, recovery, maintenance, dashboard, event-log integrity)");
 }
 
 main().then(

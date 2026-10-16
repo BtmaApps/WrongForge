@@ -131,6 +131,12 @@ export class McpRegistry {
   private pool = new Map<string, Conn>();
   private connecting = new Map<string, Promise<Conn>>();
   private lastError = new Map<string, string>();
+  /**
+   * Bumped by `invalidate`/`closeAll`. A connect captures it before it suspends and
+   * compares after: a connection established across a shutdown or a config change
+   * must never be published into the pool.
+   */
+  private gen = 0;
   private readonly env: NodeJS.ProcessEnv;
   private readonly idleMs: number;
   private readonly toolsTtlMs: number;
@@ -207,6 +213,7 @@ export class McpRegistry {
     if (!spec.enabled) throw new McpError("server_disabled", `MCP server "${name}" is disabled`);
 
     const key = this.specKey(name, spec);
+    const gen = this.gen; // captured before the suspension below
     // a changed config must not reuse an old connection
     for (const c of [...this.pool.values()]) if (c.name === name && c.key !== key && c.refs === 0) void this.drop(c);
 
@@ -214,7 +221,7 @@ export class McpRegistry {
     if (!conn) {
       let p = this.connecting.get(key);
       if (!p) {
-        p = this.connect(name, spec, key).finally(() => this.connecting.delete(key));
+        p = this.connect(name, spec, key, gen).finally(() => this.connecting.delete(key));
         this.connecting.set(key, p);
       }
       conn = await p;
@@ -241,11 +248,13 @@ export class McpRegistry {
 
   /** Closes the pooled connection(s) of a server (after its config changed). */
   async invalidate(name: string): Promise<void> {
+    this.gen++; // a connect still in flight must not publish after this
     await Promise.all([...this.pool.values()].filter((c) => c.name === name).map((c) => this.drop(c)));
     this.lastError.delete(name);
   }
 
   async closeAll(): Promise<void> {
+    this.gen++; // a connect still in flight must not publish after this
     await Promise.all([...this.pool.values()].map((c) => this.drop(c)));
   }
 
@@ -264,7 +273,7 @@ export class McpRegistry {
     };
   }
 
-  private async connect(name: string, spec: NormalizedSpec, key: string): Promise<Conn> {
+  private async connect(name: string, spec: NormalizedSpec, key: string, gen: number): Promise<Conn> {
     const started = Date.now();
     const live = this.expandSpec(name, spec); // may throw McpConfigError (missing ${VAR})
     let transport: StdioClientTransport | StreamableHTTPClientTransport | SSEClientTransport;
@@ -301,8 +310,8 @@ export class McpRegistry {
 
     const timeout = live.startup_timeout_ms;
     let client: Client | undefined;
+    const c = new Client({ name: "wrongforge", version: "0.3.0" });
     try {
-      const c = new Client({ name: "wrongforge", version: "0.3.0" });
       await Promise.race([
         c.connect(transport),
         new Promise<never>((_, rej) => {
@@ -312,6 +321,9 @@ export class McpRegistry {
       ]);
       client = c;
     } catch (e) {
+      // the transport has already spawned the child — release it, or a failed
+      // connect leaks the process (and its stdio pipes) for the rest of our life
+      await c.close().catch(() => undefined);
       let tail = "";
       if (stderrFile) {
         try {
@@ -336,6 +348,12 @@ export class McpRegistry {
     }
 
     const conn: Conn = { name, key, spec, client, refs: 0 };
+    // the registry may have been shut down (`closeAll`) or this server's config
+    // replaced (`invalidate`) while we were connecting — drop instead of publishing
+    if (gen !== this.gen) {
+      await client!.close().catch(() => undefined);
+      throw new McpError("mcp_unavailable", `MCP server "${name}" was closed or reconfigured while connecting`);
+    }
     this.pool.set(key, conn);
     this.lastError.delete(name);
     const info = client.getServerVersion();

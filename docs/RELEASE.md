@@ -63,9 +63,13 @@ overrides the repo). A newer release shows in the serve banner, the log
 dashboard's top bar.
 
 The swap: download → sha256 verify against the release digest → rename the
-running exe to `<exe>.old` (allowed on Windows) → move the new one in →
-respawn with the same argv → exit. The `.old` file is cleaned up on the next
-start. If the digest does not match, nothing is installed.
+running exe to `<exe>.old.<pid>` (allowed on Windows) → move the new one in →
+respawn with the same argv → exit. The rollback copy is pid-owned, so a
+concurrent update never deletes another instance's copy; copies whose owning
+process is gone are cleaned up on the next start. A release that publishes no
+sha256 digest for the asset is **not installed** — the update fails closed
+rather than installing unverified bytes. If the digest does not match, nothing
+is installed either.
 
 ## macOS note
 

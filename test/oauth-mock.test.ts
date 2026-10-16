@@ -293,8 +293,78 @@ function main(): Promise<void> {
           }
         }
 
+        // 6) a stale in-flight refresh must not overwrite a newer login
+        //    (F501 — gated completion order: the refresh reply is released
+        //    only AFTER the new login has been installed; no sleeps)
+        {
+          const held: (() => void)[] = [];
+          let arrived!: () => void;
+          const arriving = new Promise<void>((r) => (arrived = r));
+          let seq = 0;
+          const raceSrv = http.createServer((req, res) => {
+            const chunks: Buffer[] = [];
+            req.on("data", (c: Buffer) => chunks.push(c));
+            req.on("end", () => {
+              const b = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+              res.writeHead(200, { "Content-Type": "application/json" });
+              if (b.grant_type === "refresh_token") {
+                arrived();
+                held.push(() =>
+                  res.end(
+                    JSON.stringify({
+                      access_token: `at-stale-${seq}`,
+                      refresh_token: `rt-stale-${seq}`,
+                      expires_in: 3600,
+                      scope: "user:inference",
+                    }),
+                  ),
+                );
+                return;
+              }
+              res.end(
+                JSON.stringify({
+                  access_token: `at-login-${seq}`,
+                  refresh_token: `rt-login-${seq}`,
+                  expires_in: 3600,
+                  scope: "user:inference",
+                }),
+              );
+            });
+          });
+          await new Promise<void>((r) => raceSrv.listen(0, "127.0.0.1", r));
+          const racePort = (raceSrv.address() as any).port;
+          const prevRace = process.env.ANTHROPIC_TOKEN_URL;
+          const home = mkTmp("wf-race-");
+          try {
+            process.env.ANTHROPIC_TOKEN_URL = `http://127.0.0.1:${racePort}/v1/oauth/token`;
+            const store = path.join(home, "race-tokens.json");
+            const oauth5 = new ClaudeOAuth(store);
+            await oauth5.exchangeCode("c1", "v1", "https://console.anthropic.com/oauth/code/callback", "user:inference");
+            seq = 1;
+            (oauth5 as any).token.expiresAt = Date.now() - 1000; // force a refresh
+
+            const inflight = oauth5.refresh(); // do NOT await
+            await arriving; // barrier: the refresh request is in flight
+            const newer = await oauth5.exchangeCode("c2", "v2", "https://console.anthropic.com/oauth/code/callback", "user:inference");
+            held.shift()!(); // only NOW let the stale refresh land
+            await inflight;
+
+            check(
+              (await oauth5.getAccessToken()) === newer.accessToken,
+              "a refresh that lands after a newer login must not overwrite it",
+            );
+            check(
+              (await new ClaudeOAuth(store).getAccessToken()) === newer.accessToken,
+              "the newer login survives on disk too",
+            );
+          } finally {
+            process.env.ANTHROPIC_TOKEN_URL = prevRace;
+            raceSrv.close();
+          }
+        }
+
         server.close();
-        console.log("ALL TESTS PASSED ✓ (exchange, refresh, header injection, import, refresh-token recovery)");
+        console.log("ALL TESTS PASSED ✓ (exchange, refresh, header injection, import, refresh-token recovery, stale-refresh race)");
         resolve();
       } catch (e) {
         server.close();

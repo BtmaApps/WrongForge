@@ -99,9 +99,45 @@ class Store {
   private usageTimer: ReturnType<typeof setInterval> | null = null;
   private seeded = false;
   private httpSeq = 0;
-  /** Feed keys already shown — the SSE backlog replays past events, and the
-   * same event must not land twice (replay + live). */
-  private feedKeys = new Set<string>();
+  /** Highest event seq already applied, per task. The backlog replays past events
+   * and a reconnect replays them again, and the server's seq is gap-free per
+   * task, so "at or below the watermark" identifies a replay exactly — with one
+   * number per task instead of one key per event. */
+  private appliedSeq = new Map<string, number>();
+  /** Same, for http.request frames: they carry no id and the server replays
+   * the whole tap log to every reconnect, so they are keyed by their tuple. */
+  private tapKeys = new Set<string>();
+
+  private static readonly TAP_KEY_CAP = 600;
+  private static readonly TASK_SEQ_CAP = 5_000;
+
+  /** Records `seq` as applied for `taskId`, returning false if it is a replay. */
+  private noteApplied(taskId: string, seq: number): boolean {
+    if (seq <= (this.appliedSeq.get(taskId) ?? 0)) return false; // replay / late frame
+    this.appliedSeq.set(taskId, seq);
+    if (this.appliedSeq.size > Store.TASK_SEQ_CAP) {
+      let drop = Store.TASK_SEQ_CAP >> 2;
+      for (const id of this.appliedSeq.keys()) {
+        this.appliedSeq.delete(id);
+        if (--drop <= 0) break;
+      }
+    }
+    return true;
+  }
+
+  /** True when `key` is new; records it, evicting the oldest quarter at the cap. */
+  private remember(seen: Set<string>, key: string): boolean {
+    if (seen.has(key)) return false;
+    if (seen.size >= Store.TAP_KEY_CAP) {
+      let drop = Store.TAP_KEY_CAP >> 2;
+      for (const old of seen) {
+        seen.delete(old);
+        if (--drop <= 0) break;
+      }
+    }
+    seen.add(key);
+    return true;
+  }
 
   getState = (): State => this.state;
 
@@ -175,14 +211,22 @@ class Store {
         api<{ tasks: TaskRecord[] }>("/v1/tasks?limit=300", key),
         api<{ sessions: SessionMeta[] }>("/v1/sessions", key),
       ]);
-      const tasks = new Map(tasksRes.tasks.map((t) => [t.id, t]));
-      this.set((s) => ({
-        tasks,
-        sessions: sessionsRes.sessions,
-        // keep events of tasks the list no longer returns (retention) — the
-        // detail view reads them until the task is dismissed
-        perTask: new Map([...s.perTask].filter(([id]) => tasks.has(id) || s.perTask.get(id)!.length < PER_TASK_CAP)),
-      }));
+      this.set((s) => {
+        // The snapshot was produced BEFORE this await resolved, so a live
+        // event that landed in the meantime is newer for the fields it owns.
+        const tasks = new Map<string, TaskRecord>();
+        for (const snap of tasksRes.tasks) {
+          const live = s.tasks.get(snap.id);
+          tasks.set(snap.id, live ? mergeTask(snap, live) : snap);
+        }
+        return {
+          tasks,
+          sessions: sessionsRes.sessions,
+          // keep events of tasks the list no longer returns (retention) — the
+          // detail view reads them until the task is dismissed
+          perTask: new Map([...s.perTask].filter(([id]) => tasks.has(id) || s.perTask.get(id)!.length < PER_TASK_CAP)),
+        };
+      });
       if (!this.seeded) {
         this.seeded = true;
         await this.seedFeed(tasksRes.tasks.slice(0, 3).map((t) => t.id));
@@ -217,7 +261,7 @@ class Store {
       const merged = [...rows.filter((r) => !have.has(r.key)), ...s.feed];
       merged.sort((a, b) => a.at - b.at);
       const feed = merged.slice(-FEED_CAP);
-      for (const r of feed) this.feedKeys.add(r.key);
+      for (const r of feed) this.noteApplied(r.ev.task_id, r.ev.seq);
       return { feed };
     });
   }
@@ -328,13 +372,19 @@ class Store {
     // on screen — so the feed keeps itself ordered by event time, not arrival
     const at = Date.parse(e.ts ?? "") || Date.now();
     const status = e.status ?? 0;
+    const method = e.method ?? "?";
+    const path = e.path ?? "?";
+    const duration = e.duration_ms ?? 0;
+    // No frame id on the wire, and a reconnect replays the whole tap log: the
+    // tuple is the only stable identity, so it is the dedupe key.
+    if (!this.remember(this.tapKeys, `${method}|${path}|${status}|${duration}|${e.ts ?? ""}`)) return;
     const ev: TaskEvent = {
       seq: 0,
       ts: e.ts ?? new Date().toISOString(),
       task_id: "—",
       session_id: "—",
       type: "http.request",
-      data: { method: e.method ?? "?", path: e.path ?? "?", status, duration_ms: e.duration_ms ?? 0 },
+      data: { method, path, status, duration_ms: duration },
     };
     this.set((s) => {
       const feed = [...s.feed, { key: `http:${++this.httpSeq}`, at, ev }];
@@ -347,17 +397,15 @@ class Store {
           total: s.http.total + 1,
           errors: s.http.errors + (status >= 400 ? 1 : 0),
           times: [...s.http.times, at].filter((t) => t > Date.now() - 120_000),
-          last: { method: e.method ?? "?", path: e.path ?? "?", status, duration_ms: e.duration_ms ?? 0, at },
+          last: { method, path, status, duration_ms: duration, at },
         },
       };
     });
   }
 
   applyEvent(ev: TaskEvent): void {
+    if (!this.noteApplied(ev.task_id, ev.seq)) return; // already replayed via the backlog
     const key = `${ev.task_id}:${ev.seq}`;
-    if (this.feedKeys.has(key)) return; // already replayed via the backlog
-    if (this.feedKeys.size > 4_000) this.feedKeys.clear();
-    this.feedKeys.add(key);
     const at = Date.parse(ev.ts) || Date.now(); // backlog frames arrive with their real ts
     const seen = at; // activity watermark (replay keeps idle honest)
     this.set((s) => {
@@ -453,6 +501,23 @@ function pulse(pulses: Map<string, number>, id: string, at: number): void {
 
 function num(v: number | undefined): number {
   return typeof v === "number" && Number.isFinite(v) ? v : 0;
+}
+
+/**
+ * Snapshot + live convergence: the server stays authoritative for the fields it
+ * owns (prompt, workdir, result…), but a live event is newer than the snapshot
+ * it raced with — keyed on the task's own event sequence, never on arrival.
+ */
+function mergeTask(snap: TaskRecord, live: TaskRecord): TaskRecord {
+  const snapSeq = snap.progress?.last_event_seq ?? 0;
+  if ((live.progress?.last_event_seq ?? 0) <= snapSeq) return snap;
+  return {
+    ...snap,
+    status: live.status,
+    started_at: live.started_at ?? snap.started_at,
+    finished_at: live.finished_at ?? snap.finished_at,
+    progress: live.progress,
+  };
 }
 
 /** Folds an event into the task document so list views stay current. */

@@ -165,7 +165,7 @@ export function createAgentServer(opts: ServerOptions): http.Server {
    */
   const serveWebui = async (res: http.ServerResponse, pathname: string): Promise<boolean> => {
     if (webuiBuilt()) {
-      let file = path.resolve(webuiDir, "." + decodeURIComponent(pathname));
+      let file = path.resolve(webuiDir, "." + seg(pathname));
       if (file !== path.resolve(webuiDir) && !file.startsWith(path.resolve(webuiDir) + path.sep)) {
         return false; // traversal — not ours to serve
       }
@@ -197,7 +197,7 @@ export function createAgentServer(opts: ServerOptions): http.Server {
     // asset paths resolve, so traversal cannot escape the map)
     const embedded = await embeddedWebui();
     if (embedded["index.html"]) {
-      const key = decodeURIComponent(pathname).replace(/^\/+/, "");
+      const key = seg(pathname).replace(/^\/+/, "");
       const rel = embedded[key] !== undefined ? key : "index.html"; // SPA fallback
       const ext = path.extname(rel).toLowerCase();
       const body = embedded[rel]!;
@@ -285,6 +285,20 @@ export function createAgentServer(opts: ServerOptions): http.Server {
     return n;
   };
   const flag = (url: URL, name: string): boolean => /^(1|true|yes)$/i.test(url.searchParams.get(name) ?? "");
+
+  /**
+   * Decodes one client-supplied URL path segment. A malformed escape is a
+   * client error, never an unhandled URIError — `decodeURIComponent` throws on
+   * a bare "%" and that used to escape dispatch's catch-all as a 500 on four
+   * routes, one of them (the public dashboard route) reachable unauthenticated.
+   */
+  const seg = (raw: string): string => {
+    try {
+      return decodeURIComponent(raw);
+    } catch {
+      throw new HttpError(400, "invalid_request", "malformed percent-encoding in the request path");
+    }
+  };
 
   /**
    * A workdir the dashboard's "run a test task" button can submit against:
@@ -446,17 +460,30 @@ export function createAgentServer(opts: ServerOptions): http.Server {
   function globalEvents(req: http.IncomingMessage, res: http.ServerResponse, url: URL): void {
     const taskFilter = url.searchParams.get("task_id");
     const sessionFilter = url.searchParams.get("session_id");
+    // One predicate for the WHOLE feed — the replayed backlog and the live tail.
+    // It used to guard only the live subscription, so a filtered subscriber was
+    // handed every other session's replayed backlog on connect (F201).
+    // http.request frames carry no task_id/session_id, so they cannot be
+    // attributed to a filtered feed and are dropped wholesale when a filter is
+    // active — that is what "the filter filters the feed" means. Unfiltered
+    // dashboards (the dashboard itself uses /v1/events with no filter) keep the
+    // traffic view.
+    const filtered = taskFilter !== null || sessionFilter !== null;
+    const keep = (ev: { task_id?: string; session_id?: string }): boolean => {
+      if (taskFilter && ev.task_id !== taskFilter) return false;
+      if (sessionFilter && ev.session_id !== sessionFilter) return false;
+      return true;
+    };
     sseStart(res);
     // Backlog first: the recent-traffic ring AND the newest task events from
     // disk (the agent's rounds, tool calls, texts — heartbeats skipped), so a
     // dashboard opened late — or after a serve restart — immediately sees
     // what ran while it was away. Everything below is synchronous — no live
     // frame can fall into the gap before the subscriptions attach.
-    for (const e of httpTapLog) res.write(`event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`);
-    for (const ev of manager.recentEvents()) res.write(`event: ${ev.type}\ndata: ${JSON.stringify(ev)}\n\n`);
+    for (const e of httpTapLog) if (!filtered) res.write(`event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`);
+    for (const ev of manager.recentEvents()) if (keep(ev)) res.write(`event: ${ev.type}\ndata: ${JSON.stringify(ev)}\n\n`);
     const unsub = manager.subscribe((ev) => {
-      if (taskFilter && ev.task_id !== taskFilter) return;
-      if (sessionFilter && ev.session_id !== sessionFilter) return;
+      if (!keep(ev)) return;
       res.write(`event: ${ev.type}\ndata: ${JSON.stringify(ev)}\n\n`);
     });
     // live HTTP traffic: every /v1 call except this stream itself (watching
@@ -464,7 +491,8 @@ export function createAgentServer(opts: ServerOptions): http.Server {
     // The tap is on `finish`: a held-open request (wait/stream submit) only
     // appears once it completes.
     const tap = (e: HttpTapEvent): void => {
-      if (!res.writableEnded) res.write(`event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`);
+      if (res.writableEnded || filtered) return;
+      res.write(`event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`);
     };
     httpTaps.add(tap);
     const ping = setInterval(() => res.write(": ping\n\n"), 15_000);
@@ -534,7 +562,7 @@ export function createAgentServer(opts: ServerOptions): http.Server {
       return false;
     }
 
-    const id = decodeURIComponent(parts[2]!);
+    const id = seg(parts[2]!);
     if (!SessionStore.isValidId(id)) throw new HttpError(400, "invalid_request", "invalid session id");
     const notFound = new HttpError(404, "session_not_found", `no session "${id}"`);
 
@@ -583,7 +611,7 @@ export function createAgentServer(opts: ServerOptions): http.Server {
     }
     if (parts[2] !== "servers" || parts.length < 4) return false;
 
-    const name = decodeURIComponent(parts[3]!);
+    const name = seg(parts[3]!);
     const sub = parts[4];
     const known = (): void => {
       if (!mcp.store.get(name)) throw new HttpError(404, "mcp_server_not_found", `no MCP server named "${name}"`);
@@ -680,7 +708,7 @@ export function createAgentServer(opts: ServerOptions): http.Server {
           return json(res, 200, { tasks, next_before: tasks.length === limit ? tasks[tasks.length - 1]!.created_at : null });
         }
       } else {
-        const id = decodeURIComponent(parts[2]!);
+        const id = seg(parts[2]!);
         if (parts.length === 3 && method === "GET") {
           const task = manager.get(id);
           if (!task) throw taskNotFound(id);
@@ -751,7 +779,7 @@ export function createAgentServer(opts: ServerOptions): http.Server {
         const status = e.code === "unknown_server" ? 404 : e.code === "server_disabled" ? 409 : 502;
         return json(res, status, { error: { code: e.code, message: e.message } });
       }
-      app.logger.error("http.unhandled", { method: req.method, path: req.url, error: e });
+      app.logger.error("http.unhandled", { method: req.method, path: (req.url ?? "").split("?")[0], error: e });
       json(res, 500, { error: { code: "internal_error", message: (e as Error).message } });
     });
   });

@@ -208,6 +208,11 @@ export async function compactMessages(
     .map((b) => b.text)
     .join("")
     .trim();
+  // max_tokens is a successful response with a truncated body: installing it
+  // would replace the conversation with a summary that stops mid-sentence.
+  if (res.stop_reason === "max_tokens") {
+    throw new Error("the summarizer hit its output limit (max_tokens) — the session was left unchanged");
+  }
   if (!summary) throw new Error("the model returned an empty summary");
 
   const next: AgentMessage[] = [

@@ -238,6 +238,16 @@ export class ClaudeOAuth {
   private inflightRefresh: Promise<StoredToken | null> | null = null;
   /** Set when Claude Code recovery itself failed — stop retrying this process. */
   private recoveryExhausted = false;
+  /**
+   * Bumped every time `this.token` is replaced from any path (login, import,
+   * logout, a completed refresh). A refresh captures it before it suspends and
+   * compares after, so a response that belongs to a superseded session is
+   * dropped instead of overwriting — and re-persisting — the newer one.
+   */
+  private tokenGeneration = 0;
+  /** Why the last refresh failed, so the caller learns the cause, not just
+   *  "run npm run import" (F503). Null until a refresh actually fails. */
+  private lastRefreshError: string | null = null;
 
   constructor(storePath?: string) {
     this.store = new TokenStore(
@@ -365,9 +375,8 @@ export class ClaudeOAuth {
         `token exchange HTTP ${res.status}: ${JSON.stringify(res.json)}`,
       );
     }
-    this.token = this.applyTokenResponse(res.json, scope);
     console.log("[auth] login successful, token received");
-    return this.token;
+    return this.applyTokenResponse(res.json, scope);
   }
 
   // ------------------------------------------------------------------
@@ -378,6 +387,7 @@ export class ClaudeOAuth {
     if (this.inflightRefresh) return this.inflightRefresh;
     const current = this.token;
     if (!current?.refreshToken) return null;
+    const generation = this.tokenGeneration;
     this.inflightRefresh = (async () => {
       try {
         const res = await tokenPost(this.requireConfig().tokenUrl, {
@@ -385,6 +395,13 @@ export class ClaudeOAuth {
           client_id: this.requireConfig().clientId,
           refresh_token: current.refreshToken,
         });
+        // The session was replaced while we were suspended (login, import or
+        // logout): this response belongs to a superseded token — drop it rather
+        // than overwrite the newer session in memory and on disk.
+        if (this.tokenGeneration !== generation) {
+          console.log("[auth] token refreshed concurrently — keeping the newer session");
+          return this.token;
+        }
         if (res.status !== 200 || !res.json?.access_token) {
           console.error(
             `[auth] refresh HTTP ${res.status}: ${JSON.stringify(res.json)}`,
@@ -394,10 +411,12 @@ export class ClaudeOAuth {
           // failing every task until someone runs `npm run import`
           return await this.recoverFromClaudeCode();
         }
-        this.token = this.applyTokenResponse(res.json, current.scope);
+        this.applyTokenResponse(res.json, current.scope);
+        this.lastRefreshError = null;
         console.log("[auth] token refreshed");
         return this.token;
       } catch (e) {
+        this.lastRefreshError = (e as Error).message;
         console.error(`[auth] refresh network error: ${(e as Error).message}`);
         return null;
       } finally {
@@ -435,7 +454,7 @@ export class ClaudeOAuth {
       });
       if (res.status === 200 && res.json?.access_token) {
         console.warn("[auth] refresh token rejected — adopted Claude Code's session and refreshed it");
-        this.token = this.applyTokenResponse(res.json, imported.scope);
+        this.applyTokenResponse(res.json, imported.scope);
         return this.token;
       }
       this.recoveryExhausted = true;
@@ -450,14 +469,38 @@ export class ClaudeOAuth {
     }
   }
 
-  /** Applies a token response, deriving expires_at from expires_in. */
+  /**
+   * Applies a token response, deriving expires_at from expires_in.
+   *
+   * This is the trust boundary: `body` is whatever the remote token endpoint
+   * returned, and the result is both served to callers and written to disk. A
+   * non-numeric `expires_in` (e.g. the string "soon") would make expiresAt NaN,
+   * and every comparison against NaN is false — so the token would look valid
+   * forever — while JSON.stringify(NaN) persists as null, which flips the same
+   * record to "expired" after a restart and refreshes on every call. Reject a
+   * malformed response instead of storing it (F502).
+   */
   private applyTokenResponse(body: any, scope: string): StoredToken {
+    if (typeof body?.access_token !== "string" || !body.access_token) {
+      throw new Error("token response contained no usable access_token");
+    }
+    const rawExpiresIn = body.expires_in;
+    const expiresIn =
+      typeof rawExpiresIn === "number" && Number.isFinite(rawExpiresIn) && rawExpiresIn > 0
+        ? rawExpiresIn
+        : 3600; // absent or malformed -> the documented one-hour default
+    const refreshToken =
+      typeof body.refresh_token === "string" && body.refresh_token
+        ? body.refresh_token
+        : this.token?.refreshToken ?? "";
     const t: StoredToken = {
       accessToken: body.access_token,
-      refreshToken: body.refresh_token ?? this.token?.refreshToken ?? "",
-      expiresAt: Date.now() + (body.expires_in ?? 3600) * 1000,
-      scope: body.scope ?? scope,
+      refreshToken,
+      expiresAt: Date.now() + expiresIn * 1000,
+      scope: typeof body.scope === "string" && body.scope ? body.scope : scope,
     };
+    this.token = t;
+    this.tokenGeneration++;
     this.store.save(t);
     return t;
   }
@@ -468,8 +511,9 @@ export class ClaudeOAuth {
     if (this.token.expiresAt - 60_000 <= Date.now()) {
       const fresh = await this.refresh();
       if (!fresh) {
+        const cause = this.lastRefreshError ? ` (${this.lastRefreshError})` : "";
         throw new Error(
-          "token refresh failed — run Claude Code once, then `npm run import` (or `npm run login`)",
+          `token refresh failed${cause} — run Claude Code once, then \`npm run import\` (or \`npm run login\`)`,
         );
       }
       return fresh.accessToken;
@@ -480,6 +524,7 @@ export class ClaudeOAuth {
   logout(): void {
     this.store.clear();
     this.token = null;
+    this.tokenGeneration++;
   }
 
   // ------------------------------------------------------------------
@@ -515,6 +560,7 @@ export class ClaudeOAuth {
         : "user:inference user:profile",
     };
     this.token = t;
+    this.tokenGeneration++;
     this.store.save(t);
     console.log(
       `[auth] imported Claude Code session (expires ${new Date(t.expiresAt).toISOString()})`,

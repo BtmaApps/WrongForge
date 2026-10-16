@@ -133,6 +133,20 @@ const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]{0,99}$/;
 /** Workdir identity for locking (Windows paths are case-insensitive). */
 const dirKey = (p: string): string => (process.platform === "win32" ? p.toLowerCase() : p);
 
+/**
+ * Resolves when `p` resolves, or after `ms` — whichever comes first. Unlike a
+ * bare `Promise.race`, the deadline timer is cleared as soon as the race is
+ * settled, so giving up never leaves a live timer behind that outlives the work
+ * (it would keep the process alive after a cancel or after shutdown returned).
+ */
+function deadline(p: Promise<unknown>, ms: number): Promise<unknown> {
+  let t: NodeJS.Timeout | undefined;
+  const guard = new Promise<void>((r) => {
+    t = setTimeout(r, ms);
+  });
+  return Promise.race([p, guard]).finally(() => clearTimeout(t));
+}
+
 export class TaskManager {
   private readonly o: Required<
     Pick<ManagerOptions, "maxConcurrency" | "heartbeatMs" | "defaultTimeoutMs" | "maxTimeoutMs" | "textFlushMs" | "progressSaveMs">
@@ -446,7 +460,7 @@ export class TaskManager {
       this.finalize(id, "cancelled", {});
     } else {
       live.abort.abort();
-      await Promise.race([live.done, new Promise((r) => setTimeout(r, 10_000))]);
+      await deadline(live.done, 10_000);
     }
     return { task: this.o.store.get(id)!, already_finished: false };
   }
@@ -487,8 +501,8 @@ export class TaskManager {
       live.abort.abort();
       pending.push(live.done);
     }
-    await Promise.race([Promise.all(pending), new Promise((r) => setTimeout(r, graceMs))]);
-    await Promise.race([this.o.webhook?.idle(), new Promise((r) => setTimeout(r, graceMs))]);
+    await deadline(Promise.all(pending), graceMs);
+    await deadline(this.o.webhook?.idle() ?? Promise.resolve(), graceMs);
     this.flushSaves();
   }
 
@@ -997,6 +1011,12 @@ export class TaskManager {
       o.store.appendEvent(ev);
     } catch (e) {
       o.logger.error("task.event_write_failed", { task_id: id, seq, error: e });
+      // The event never reached the durable log, so nothing can replay it.
+      // Give the seq back (events.jsonl stays gap-free, as documented) and do
+      // not hand a seq to a subscriber or the webhook that no reader would
+      // ever be able to resume from.
+      this.seqs.set(id, seq - 1);
+      return ev;
     }
     rec.progress.last_event_seq = seq;
     if (type !== "task.heartbeat") rec.progress.last_activity_at = ts;

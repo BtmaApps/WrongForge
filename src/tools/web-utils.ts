@@ -28,9 +28,16 @@ export function isPrivateAddress(ip: string): boolean {
     );
   }
   if (v === 6) {
-    const s = ip.toLowerCase();
-    const mapped = s.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
-    if (mapped) return isPrivateAddress(mapped[1]);
+    // URL parsing canonicalises IPv6 to the compressed hex form, so a host
+    // written "::ffff:127.0.0.1" always arrives here as "::ffff:7f00:1": read
+    // the low 32 bits of both spellings, or a mapped host reads as public.
+    const s = canonicalIpv6(ip);
+    const mapped = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(s);
+    if (mapped) {
+      const hi = parseInt(mapped[1], 16);
+      const lo = parseInt(mapped[2], 16);
+      return isPrivateAddress(`${hi >> 8}.${hi & 0xff}.${lo >> 8}.${lo & 0xff}`);
+    }
     return (
       s === "::" ||
       s === "::1" ||
@@ -40,6 +47,15 @@ export function isPrivateAddress(ip: string): boolean {
     );
   }
   return true; // not an IP literal: treat as unsafe
+}
+
+/** Lower-cased, compressed IPv6 text (the WHATWG form). `ip` is already valid. */
+function canonicalIpv6(ip: string): string {
+  try {
+    return new URL(`http://[${ip}]/`).hostname.replace(/^\[|\]$/g, "");
+  } catch {
+    return ip.toLowerCase();
+  }
 }
 
 export async function assertPublicUrl(raw: string): Promise<URL> {
@@ -81,6 +97,9 @@ export async function readCapped(
     chunks.push(value);
     total += value.length;
   }
+  // the loop stops on the counter, not on the stream: a body that ends exactly
+  // at maxBytes exits here too, so ask once more before calling it truncated
+  if (!finished) finished = (await reader.read()).done;
   await reader.cancel().catch(() => {});
   const all = Buffer.concat(chunks);
   return { buf: all.subarray(0, maxBytes), capped: !finished || all.length > maxBytes };

@@ -213,8 +213,14 @@ export async function maintainLogs(opts: MaintainOptions): Promise<MaintainResul
   let names: string[];
   try {
     names = fs.readdirSync(opts.dir);
-  } catch {
-    return result; // nothing to maintain
+  } catch (e) {
+    // A directory that cannot be listed is NOT "nothing to maintain": answering
+    // clean would hide a dead housekeeping step (nothing compresses, nothing is
+    // ever deleted) behind a zero-error summary. A missing directory is benign.
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
+      result.errors.push({ file: opts.dir, error: (e as Error).message });
+    }
+    return result;
   }
 
   for (const name of names) {

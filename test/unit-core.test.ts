@@ -10,6 +10,7 @@ import * as fs from "node:fs";
 import * as http from "node:http";
 import * as os from "node:os";
 import * as path from "node:path";
+import { gunzipSync } from "node:zlib";
 import { z } from "zod";
 import {
   clearOldToolOutputs,
@@ -46,6 +47,7 @@ import { startLiveView } from "../src/liveview.js";
 import { buildTaskPreamble, buildTaskSystemPrompt, loadPromptFiles, promptDir } from "../src/prompt.js";
 import { fetchPlanUsage, untilLabel, usageLine } from "../src/usage.js";
 import { retentionFromEnv, runMaintenance, startMaintenance } from "../src/maintenance.js";
+import type { MaintenanceDeps } from "../src/maintenance.js";
 import { Logger } from "../src/log.js";
 import { ClaudeOAuth } from "../src/oauth.js";
 import { TaskStore } from "../src/tasks/store.js";
@@ -337,6 +339,76 @@ async function main(): Promise<void> {
   const stop = startMaintenance({ logger: mlog, taskStore: mtasks, sessions: msessions, retention: { ...mret, intervalMinutes: 30 } });
   stop();
   assert(true, "startMaintenance returns stopper");
+
+  // F703: a tick must never start a pass while one is still running — two
+  // overlapping passes compress the same log into the same <file>.gz.tmp.
+  // Ordering comes from a latch (pass 1 is parked in taskStore.maintain), not
+  // from sleeps; the timers themselves are unref'ed, so hold the loop open.
+  {
+    let entered = 0;
+    let maxConcurrent = 0;
+    let release: (() => void) | null = null;
+    let started!: () => void;
+    const first = new Promise<void>((r) => {
+      started = r;
+    });
+    const parked = {
+      maintain: async () => {
+        entered++;
+        maxConcurrent = Math.max(maxConcurrent, entered);
+        started();
+        await new Promise<void>((r) => {
+          release = r;
+        });
+        entered--;
+        return { compressed: [], deleted: [], errors: [] };
+      },
+    } as unknown as TaskStore;
+    const hold = setTimeout(() => undefined, 30_000);
+    const stopFast = startMaintenance({ logger: mlog, taskStore: parked, sessions: msessions, retention: retentionFromEnv({ WRONGFORGE_MAINTENANCE_INTERVAL_MIN: "0.002" }) });
+    await first;
+    await new Promise((r) => setTimeout(r, 500)); // several 120ms ticks elapse
+    assert(maxConcurrent === 1, `maintenance: overlapping passes (${maxConcurrent} in flight)`);
+    release?.();
+    await new Promise((r) => setTimeout(r, 100)); // let the pass unwind
+    stopFast();
+    clearTimeout(hold);
+    assert(entered === 0, `maintenance: parked pass released (entered=${entered})`);
+  }
+
+  // F931: `runMaintenance` is reachable from outside the scheduler —
+  // `POST /v1/maintenance/run` passes a fresh deps literal — so the in-flight guard
+  // has to live in the pass itself. Two overlapping passes fight over the same
+  // `<file>.gz.tmp` and one of them dies on the rename, so a pass that did its work
+  // reports a failure. Ordering is synchronous (both passes are started in the same
+  // tick and both reach createWriteStream before any I/O completes), no sleeps.
+  {
+    const oh = path.join(tmp, "maint-overlap");
+    const odir = path.join(oh, "logs");
+    fs.mkdirSync(odir, { recursive: true });
+    const ofile = path.join(odir, "forge-2026-10-01.jsonl");
+    const oline = JSON.stringify({ ts: "2026-10-01T00:00:00.000Z", level: "info", event: "test.record", pad: "x".repeat(200) });
+    fs.writeFileSync(ofile, Array.from({ length: 4000 }, () => oline).join("\n") + "\n");
+    const original = fs.readFileSync(ofile);
+    const oldWhen = new Date(Date.now() - 10 * 86_400_000);
+    fs.utimesSync(ofile, oldWhen, oldWhen);
+    const olog = new Logger({ dir: odir });
+    const otasks = new TaskStore(path.join(oh, "tasks"));
+    const osessions = new SessionStore(path.join(oh, "sessions"));
+    const odeps = (): MaintenanceDeps => ({
+      logger: olog, taskStore: otasks, sessions: osessions,
+      retention: retentionFromEnv({ WRONGFORGE_LOG_COMPRESS_AFTER_DAYS: "1", WRONGFORGE_LOG_RETENTION_DAYS: "0" }),
+      now: () => new Date(),
+    });
+    const [p1, p2] = await Promise.all([runMaintenance(odeps()), runMaintenance(odeps())]);
+    const oerrs = [...p1.logs.errors, ...p2.logs.errors];
+    assert(oerrs.length === 0, `maintenance: overlapping passes report no error (got ${oerrs.length}: ${JSON.stringify(oerrs)})`);
+    assert(fs.existsSync(ofile + ".gz"), "maintenance: the overlapping pair produced the archive");
+    assert(gunzipSync(fs.readFileSync(ofile + ".gz")).equals(original), "maintenance: the archive is byte-identical to the original");
+    // the guard is not sticky: a later pass really runs again
+    const p3 = await runMaintenance(odeps());
+    assert(p3.logs.compressed.length === 0 && p3.logs.errors.length === 0, "maintenance: the next pass runs cleanly");
+  }
 
   // ================================================================ effort
   {

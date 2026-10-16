@@ -21,6 +21,14 @@ export const IGNORED_DIRS = new Set([
   "__pycache__",
 ]);
 
+/** True when a directory must not be walked. win32/macOS fold case, so a
+ *  tree whose entry is named `Node_Modules` IS `node_modules` to the OS;
+ *  linux paths are case-sensitive, so there the name has to match exactly. */
+const isIgnoredDir = (name: string): boolean =>
+  IGNORED_DIRS.has(name) ||
+  ((process.platform === "win32" || process.platform === "darwin") &&
+    IGNORED_DIRS.has(name.toLowerCase()));
+
 const escapeRe = (c: string): string => c.replace(/[.+^${}()|[\]\\]/g, "\\$&");
 
 /** Expands `{a,b}` groups (nested allowed). A group without a comma is literal. */
@@ -143,7 +151,7 @@ export async function walkFiles(
     for (const e of entries) {
       if (capped) return;
       if (e.isDirectory()) {
-        if (!IGNORED_DIRS.has(e.name)) await rec(path.join(dir, e.name));
+        if (!isIgnoredDir(e.name)) await rec(path.join(dir, e.name));
       } else if (e.isFile()) {
         if (out.length >= maxFiles) {
           capped = true;

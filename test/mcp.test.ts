@@ -219,6 +219,59 @@ async function main(): Promise<void> {
   assert((await regIdle.callTool("s", "echo", { text: "again" })).ok === true, "idle: reconnects transparently");
   await regIdle.closeAll();
 
+  // ================================================================ child ownership
+  // A failed connect and a connect that crosses a shutdown must both release the
+  // child process they spawned — neither may leave a live MCP server behind.
+  const pidAlive = (pid: number): boolean => {
+    try { process.kill(pid, 0); return true; } catch { return false; }
+  };
+  const pidRecorded = (file: string): Promise<number> =>
+    new Promise((resolve) => {
+      const t = setInterval(() => {
+        if (fs.existsSync(file)) { clearInterval(t); resolve(Number(fs.readFileSync(file, "utf8").trim().split("\n")[0])); }
+      }, 20);
+      setTimeout(() => { clearInterval(t); resolve(0); }, 8000);
+    });
+  const pidGone = (pid: number, ms: number): Promise<boolean> =>
+    new Promise((resolve) => {
+      const t = setInterval(() => { if (!pidAlive(pid)) { clearInterval(t); resolve(true); } }, 20);
+      setTimeout(() => { clearInterval(t); resolve(!pidAlive(pid)); }, ms);
+    });
+  // a stdio server that starts, announces its pid and never answers `initialize`
+  const mute = path.join(tmp, "mute.mcp.mjs");
+  fs.writeFileSync(mute,
+    `import * as fs from "node:fs";\nfs.writeFileSync(process.env.PIDFILE, String(process.pid));\n` +
+    `process.stdin.resume();\nsetInterval(() => {}, 1000);\n`);
+
+  const pidFile = path.join(tmp, "child.pid");
+  const regLeak = new McpRegistry({ store: new McpStore(path.join(tmp, "leak.json")), env: { PIDFILE: pidFile } });
+  regLeak.addServer("mute", { command: process.execPath, args: [mute], env: { PIDFILE: "${PIDFILE}" }, startup_timeout_ms: 1000 });
+  const muteCall = regLeak.test("mute");           // connect starts, deliberately not awaited
+  const mutePid = await pidRecorded(pidFile);      // gate: the child is up, initialize in flight
+  const muteRes = await muteCall;                  // the connect attempt has now failed
+  assert(!muteRes.ok, "ownership: a server that never initializes -> test reports failure");
+  assert(await pidGone(mutePid, 5000), `ownership: a FAILED connect releases its child (pid ${mutePid})`);
+
+  // closeAll()/invalidate() are a barrier: nothing may be published after they resolve
+  const wrap = path.join(tmp, "wrap.mcp.mjs"); // wrapper that announces the pid of the fixture it spawns
+  fs.writeFileSync(wrap,
+    `import * as fs from "node:fs";\nimport { spawn } from "node:child_process";\n` +
+    `const c = spawn(process.execPath, ${JSON.stringify([FIXTURE, "stdio"])}, { stdio: "inherit" });\n` +
+    `fs.writeFileSync(process.env.PIDFILE, String(c.pid));\nc.on("exit", (code) => process.exit(code ?? 0));\n`);
+  const barrierPidFile = path.join(tmp, "barrier.pid");
+  const regBarrier = new McpRegistry({ store: new McpStore(path.join(tmp, "barrier.json")), env: { PIDFILE: barrierPidFile } });
+  regBarrier.addServer("local", { command: process.execPath, args: [wrap], env: { PIDFILE: "${PIDFILE}" } });
+  const inflight = regBarrier.callTool("local", "echo", { text: "mid-connect" });
+  const barrierPid = await pidRecorded(barrierPidFile); // gate: the connect is still suspended
+  assert(barrierPid > 0, "ownership: the barrier gate observed the child before the connect settled");
+  await regBarrier.closeAll();
+  const inflightRes = await inflight;                    // the connect settles only now
+  assert(inflightRes.ok === false, "ownership: a call whose connect crossed closeAll() fails instead of succeeding");
+  assert(!regBarrier.status().servers[0]!.connected, "ownership: closeAll() is a barrier — no connection published after it resolved");
+  assert(await pidGone(barrierPid, 5000), `ownership: a connect crossing closeAll() releases its child (pid ${barrierPid})`);
+  assert((await regBarrier.callTool("local", "echo", { text: "back" })).ok === true, "ownership: reconnects cleanly after closeAll()");
+  await regBarrier.closeAll();
+
   // ================================================================ agent tools
   const agentReg = new McpRegistry({ store: new McpStore(path.join(tmp, "agent.json")), env: { MINI_TOKEN: TOKEN } });
   const inCtx = <T>(fn: () => Promise<T>): Promise<T> =>

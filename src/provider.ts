@@ -200,6 +200,13 @@ const CLAUDE_CODE_BETAS = [
   "extended-cache-ttl-2025-04-11",
 ];
 
+/**
+ * Beta flag names that contain "ttl". They are part of the `anthropic-beta`
+ * header we send, not of the request body, so they must never count as
+ * evidence when classifying a 400 (see the cache self-heal below).
+ */
+const TTL_BETA_NAMES = CLAUDE_CODE_BETAS.filter((b) => /ttl/i.test(b));
+
 /** The count_tokens preflight carries a smaller, fixed beta set (captured). */
 const COUNT_TOKENS_BETAS = [
   "claude-code-20250219",
@@ -463,7 +470,7 @@ export function oauthFetch(oauth: ClaudeOAuth): typeof globalThis.fetch {
     // account): retry once without them and stop sending them.
     if (res.status === 400 && effectiveCacheMode() !== "off") {
       const detail = await res.clone().text().catch(() => "");
-      if (/cache_control|cache control|ttl/i.test(detail)) {
+      if (/cache_control|cache control|ttl/i.test(TTL_BETA_NAMES.reduce((t, b) => t.split(b).join(""), detail))) {
         cacheRejected = true;
         console.error("[cache] the API rejected cache_control — prompt caching is disabled for this process:", detail.slice(0, 300));
         res = await doFetch();

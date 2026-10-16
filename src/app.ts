@@ -119,6 +119,11 @@ export function createApp(o: AppOptions): App {
     o.allowedRoots ?? (env.WRONGFORGE_ALLOWED_ROOTS ? env.WRONGFORGE_ALLOWED_ROOTS.split(path.delimiter).filter(Boolean) : []);
   const defaultWorkdirLock = o.defaultWorkdirLock ?? /^(1|true|yes)$/i.test(env.WRONGFORGE_WORKDIR_LOCK ?? "");
 
+  const envConcurrency = numEnv(env.WRONGFORGE_MAX_CONCURRENCY);
+  if (envConcurrency !== undefined && (!Number.isInteger(envConcurrency) || envConcurrency < 1)) {
+    logger.warn("config.max_concurrency_invalid", { value: envConcurrency, used: Math.max(1, Math.floor(envConcurrency)) });
+  }
+
   const managerOpts: ManagerOptions = {
     store: taskStore,
     sessions,
@@ -129,7 +134,7 @@ export function createApp(o: AppOptions): App {
     defaultWorkdir,
     allowedRoots,
     defaultWorkdirLock,
-    maxConcurrency: o.maxConcurrency ?? numEnv(env.WRONGFORGE_MAX_CONCURRENCY) ?? 2,
+    maxConcurrency: o.maxConcurrency ?? Math.max(1, Math.floor(envConcurrency ?? 2)),
     heartbeatMs: o.heartbeatMs ?? numEnv(env.WRONGFORGE_HEARTBEAT_MS),
     defaultTimeoutMs: o.defaultTimeoutMs ?? numEnv(env.WRONGFORGE_TASK_TIMEOUT_MS),
     textFlushMs: o.textFlushMs,

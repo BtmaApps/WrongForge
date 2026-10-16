@@ -214,6 +214,21 @@ async function main(): Promise<void> {
   }
   assert(threwS, "sessions: create rejects bad id");
 
+  // a crash mid-append leaves a partial record; the next appendTurn must not
+  // write behind it, or every later turn of the session is lost for good
+  sstore.create("torn");
+  const tj = path.join(sdir, "torn", "messages.jsonl");
+  sstore.appendTurn("torn", [{ role: "user", content: "q1" }, { role: "assistant", content: "a1" }], {
+    task_id: "t1", model: "m", prompt: "q1",
+  });
+  fs.appendFileSync(tj, '{"role":"assistant","content":"half writ'); // no newline: the process died here
+  sstore.appendTurn("torn", [{ role: "user", content: "q2" }], { task_id: "t2", model: "m", prompt: "q2" });
+  const torn = sstore.load("torn")!;
+  assert(torn.messages.length === 3 && torn.meta.message_count === 3, "sessions: appendTurn recovers a torn tail instead of hiding later turns");
+  assert(!fs.readFileSync(tj, "utf8").includes("half writ"), "sessions: the partial record is dropped on the next append");
+  sstore.appendTurn("torn", [{ role: "user", content: "q3" }], { task_id: "t3", model: "m", prompt: "q3" });
+  assert(sstore.load("torn")!.messages.length === 4, "sessions: still readable after further appends");
+
   const tdir = path.join(tmp, "tasks2");
   const tstore = new TaskStore(tdir);
   const badTaskDir = path.join(tdir, "tasks", "t-bad");

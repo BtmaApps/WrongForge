@@ -116,17 +116,25 @@ export async function selfUpdate(): Promise<string> {
     throw new Error("self-update replaces the compiled binary — run it as `wrongforge update` from the executable, not from source");
   }
   const exe = process.execPath;
-  const old = `${exe}.old`;
-  const download = path.join(path.dirname(exe), `.wrongforge-update-${Date.now()}`);
+  // Owned by THIS process only. A fixed `<exe>.old` is shared by every instance
+  // running from the same path, so cleaning it could delete another instance's
+  // only copy of the previous binary.
+  const old = asidePath(exe);
+  const download = path.join(path.dirname(exe), `.wrongforge-update-${process.pid}-${Date.now()}`);
 
   const res = await fetch(rel.asset.url, { signal: AbortSignal.timeout(300_000) });
   if (!res.ok) throw new Error(`download failed: HTTP ${res.status}`);
   const bytes = Buffer.from(await res.arrayBuffer());
-  if (rel.asset.digest) {
-    const want = rel.asset.digest.replace(/^sha256:/, "");
-    const got = crypto.createHash("sha256").update(bytes).digest("hex");
-    if (got !== want) throw new Error(`sha256 mismatch (wanted ${want.slice(0, 16)}…, got ${got.slice(0, 16)}…) — refusing to install`);
+  // Fail closed: a release that publishes no sha256 digest for this asset (or an
+  // unexpected digest algorithm) is NOT installed. Every WrongForge release
+  // attaches SHA256SUMS.txt, so an absent digest means the metadata cannot be
+  // trusted — installing unverified bytes would hand over the executable path.
+  if (!rel.asset.digest) {
+    throw new Error(`release ${rel.latest} publishes no sha256 digest for "${assetName()}" — refusing to install an unverified binary`);
   }
+  const want = rel.asset.digest.replace(/^sha256:/, "");
+  const got = crypto.createHash("sha256").update(bytes).digest("hex");
+  if (got !== want) throw new Error(`sha256 mismatch (wanted ${want.slice(0, 16)}…, got ${got.slice(0, 16)}…) — refusing to install`);
   fs.writeFileSync(download, bytes, { mode: 0o755 });
 
   // Windows allows RENAMING a running exe (not deleting it): move the old
@@ -134,9 +142,14 @@ export async function selfUpdate(): Promise<string> {
   try {
     fs.rmSync(old, { force: true });
   } catch {
-    /* a stale .old from an earlier update — ignore */
+    /* our own leftover from an earlier attempt in this process — ignore */
   }
-  fs.renameSync(exe, old);
+  try {
+    fs.renameSync(exe, old);
+  } catch (e) {
+    fs.rmSync(download, { force: true }); // nothing to install, drop the download
+    throw new Error(`could not move the running binary aside: ${(e as Error).message}`);
+  }
   try {
     fs.renameSync(download, exe);
   } catch (e) {
@@ -149,11 +162,47 @@ export async function selfUpdate(): Promise<string> {
   process.exit(0);
 }
 
-/** Best-effort cleanup of a `.old` binary left by the previous update. */
-export function cleanupOldBinary(): void {
+/** The rollback copy an update process owns while it swaps the binary. */
+function asidePath(exe: string, pid: number = process.pid): string {
+  return `${exe}.old.${pid}`;
+}
+
+/** True when `pid` still exists — a live pid means its update is in flight. */
+function ownerAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
-    fs.rmSync(`${process.execPath}.old`, { force: true });
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "EPERM"; // exists, not ours to signal
+  }
+}
+
+/**
+ * Best-effort cleanup of rollback copies left by previous updates.
+ * Only files no live process owns are removed: `<exe>.old.<pid>` whose owner is
+ * still running is an in-flight update, not a leftover. The legacy fixed
+ * `<exe>.old` can only predate this scheme, so it is always a leftover.
+ */
+export function cleanupOldBinary(): void {
+  const dir = path.dirname(process.execPath);
+  const base = path.basename(process.execPath);
+  const escaped = base.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const tagged = new RegExp(`^${escaped}\\.old\\.(\\d+)$`);
+  let names: string[];
+  try {
+    names = fs.readdirSync(dir);
   } catch {
-    /* not running as the binary / nothing to clean */
+    return; // not running as the binary / nothing to clean
+  }
+  for (const n of names) {
+    const m = n === `${base}.old` ? null : tagged.exec(n);
+    if (n !== `${base}.old` && !m) continue;
+    if (m && ownerAlive(Number(m[1]))) continue;
+    try {
+      fs.rmSync(path.join(dir, n), { force: true });
+    } catch {
+      /* still locked by a running process — next start retries */
+    }
   }
 }

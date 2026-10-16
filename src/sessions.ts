@@ -119,8 +119,10 @@ export class SessionStore {
     const meta = this.readMeta(id);
     if (!meta) throw new Error(`no such session: ${id}`);
     if (newMessages.length) {
+      const file = path.join(this.sdir(id), "messages.jsonl");
+      this.truncateTornTail(file); // never append behind an unreadable record
       const lines = newMessages.map((m) => JSON.stringify(m)).join("\n") + "\n";
-      fs.appendFileSync(path.join(this.sdir(id), "messages.jsonl"), lines);
+      fs.appendFileSync(file, lines);
     }
     meta.message_count += newMessages.length;
     meta.turns += 1;
@@ -218,6 +220,39 @@ export class SessionStore {
   }
 
   // ---- internals
+
+  /**
+   * Drops an incomplete trailing record left by a crash mid-append.
+   *
+   * `readMessages` stops at the first line that does not parse, so the readable
+   * history ends at the last complete record. Appending at the physical end of
+   * the file would glue the torn fragment onto the next record and hide every
+   * later turn forever — truncate to the same boundary before writing.
+   */
+  private truncateTornTail(file: string): void {
+    let size: number;
+    try {
+      size = fs.statSync(file).size;
+    } catch {
+      return; // no history yet
+    }
+    if (size === 0) return;
+    try {
+      const fd = fs.openSync(file, "r");
+      try {
+        const last = Buffer.alloc(1);
+        fs.readSync(fd, last, 0, 1, size - 1);
+        if (last[0] === 0x0a) return; // healthy: the file ends on a record boundary
+      } finally {
+        fs.closeSync(fd);
+      }
+      const raw = fs.readFileSync(file, "utf8");
+      const nl = raw.lastIndexOf("\n");
+      fs.truncateSync(file, Buffer.byteLength(nl === -1 ? "" : raw.slice(0, nl + 1)));
+    } catch {
+      /* leave the file alone — the append below will surface the real error */
+    }
+  }
 
   private readMeta(id: string): SessionMeta | null {
     try {
