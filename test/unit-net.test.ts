@@ -362,9 +362,9 @@ async function main(): Promise<void> {
   assert((capped.output as { truncated: boolean }).truncated === true, "web_fetch max_chars truncates");
   const notFound = await runTool(web_fetch, { url: `http://127.0.0.1:${webPort}/nope` }, {});
   assert(notFound.ok && (notFound.output as { ok: boolean; status: number }).ok === false && (notFound.output as { status: number }).status === 404, "web_fetch 404 reported in body");
-  const priv = await runTool(web_fetch, { url: "http://169.254.169.254/latest/meta-data" }, {});
-  assert(priv.ok === false || (priv.output as { error?: string }).error, "web_fetch blocks private address");
   delete process.env.WRONGFORGE_ALLOW_PRIVATE_URLS;
+  const priv = await runTool(web_fetch, { url: "http://169.254.169.254/latest/meta-data" }, {});
+  assert(priv.ok && (priv.output as { ok: boolean; error?: string }).ok === false && (priv.output as { error?: string }).error?.includes("blocked:"), "web_fetch blocks private address before making a request");
   const ht = htmlToText("<p>a</p><script>x</script>");
   assert(ht.text.includes("a") && !ht.text.includes("x"), "htmlToText strips scripts");
 
