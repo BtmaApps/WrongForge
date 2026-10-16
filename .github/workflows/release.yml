@@ -52,12 +52,6 @@ jobs:
         if: matrix.platform == 'macos'
         run: bun build --compile --target=bun-macos-x64 --outfile release/wrongforge-macos-x64 src/main.ts
 
-      - name: sha256
-        shell: bash
-        run: |
-          cd release
-          sha256sum wrongforge-* | tee SHA256SUMS.txt
-
       - uses: actions/upload-artifact@v4
         with:
           name: wrongforge-${{ matrix.platform }}-${{ matrix.arch }}
@@ -71,6 +65,11 @@ jobs:
         with:
           path: release
           merge-multiple: true
+
+      - name: sha256 (all platforms, one file)
+        run: |
+          cd release
+          sha256sum wrongforge-* | tee SHA256SUMS.txt
 
       - uses: softprops/action-gh-release@v2
         with:
