@@ -6,6 +6,16 @@ package.json and the git tags that drive the release workflow.
 
 ## [Unreleased]
 
+## [0.4.1] — 2026-10-16
+
+### Fixed
+- Recover incomplete session records after crashes and preserve sessions when
+  compaction reaches its output limit.
+- Harden OAuth refresh races, task deadlines, MCP connection shutdown and
+  overlapping maintenance passes.
+- Improve self-update rollback handling, web address validation and dashboard
+  event replay across reconnects.
+
 ### Added
 - **One-line installers** — `curl … install.sh | bash` (Linux/macOS) and
   `irm … install.ps1 | iex` (Windows): sha256-verified download from the
