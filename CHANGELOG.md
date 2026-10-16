@@ -15,7 +15,7 @@ current, and its requests are byte-faithful to a real Claude Code client.
   embedded; no Node, no npm, no `webui/dist` needed on the target machine.
   Binary commands: `wrongforge serve | update | version` plus the source-mode
   commands. ([docs/RELEASE.md](docs/RELEASE.md))
-- **GitHub Releases** — pushing a `v*` tag builds Windows + Linux executables
+- **GitHub Releases** — pushing a `v*` tag builds Windows, Linux and macOS executables (macOS arm64 + x64)
   with sha256 checksums and attaches them to a release
   (`.github/workflows/release.yml`, repo `WrongStack/WrongForge`).
 - **Update checks & self-update** — `serve` checks `releases/latest` at

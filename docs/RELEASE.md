@@ -51,3 +51,15 @@ The swap: download → sha256 verify against the release digest → rename the
 running exe to `<exe>.old` (allowed on Windows) → move the new one in →
 respawn with the same argv → exit. The `.old` file is cleaned up on the next
 start. If the digest does not match, nothing is installed.
+
+## macOS note
+
+The macOS binaries are **unsigned** — Gatekeeper quarantines them on first
+run. Clear it once with:
+
+```bash
+xattr -d com.apple.quarantine wrongforge-macos-*
+```
+
+(or right-click → Open the first time). Code signing would require an Apple
+Developer ID; it is not part of this workflow.
