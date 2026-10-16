@@ -332,6 +332,16 @@ data: ${JSON.stringify(o)}
   assert(r_envmodel.out.includes("claude-opus-5-5"), "repl: CLAUDE_MODEL env");
 
   // ======================================================== mcp-cli
+  // An actionable CLI failure stays concise; debug mode retains its stack.
+  const missingCredentials = path.join(tmp, "missing-credentials.json");
+  const errEnv = { CLAUDE_CREDENTIALS_FILE: missingCredentials, WRONGFORGE_DEBUG: "0" };
+  const concise = await run("src/main.ts", ["import"], { env: errEnv });
+  assert(concise.code === 1 && concise.err.includes("cannot read") && !/\n\s+at /.test(concise.err), "CLI failure prints the actionable message without a stack");
+  for (const debug of ["1", "true"]) {
+    const detailed = await run("src/main.ts", ["import"], { env: { ...errEnv, WRONGFORGE_DEBUG: debug } });
+    assert(detailed.code === 1 && detailed.err.includes("cannot read") && /\n\s+at /.test(detailed.err), `WRONGFORGE_DEBUG=${debug} retains the error stack`);
+  }
+
   const mcpHome = path.join(tmp, "mcp-home");
   const mEnv = { WRONGFORGE_HOME: mcpHome };
   const m_add = await run("src/mcp-cli.ts", ["add", "fs", "--command", "node", "--", "server.js"], { env: mEnv });

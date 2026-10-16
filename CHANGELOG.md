@@ -6,6 +6,19 @@ package.json and the git tags that drive the release workflow.
 
 ## [Unreleased]
 
+## [0.4.2] — 2026-10-16
+
+### Fixed
+- Import Claude Code credentials containing a UTF-8 BOM and distinguish
+  unreadable files, malformed JSON and missing access tokens in diagnostics.
+- Keep normal CLI errors concise; retain stack traces with `WRONGFORGE_DEBUG`.
+- Stop webhook retries and queued deliveries when the task manager shuts down.
+
+### Added
+- Regression tests for credential diagnostics, CLI debug output and webhook
+  shutdown. Releases now require typecheck, the full test suite and a native
+  binary version check on Windows, Linux and macOS before publication.
+
 ## [0.4.1] — 2026-10-16
 
 ### Fixed

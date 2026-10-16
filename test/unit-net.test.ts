@@ -275,6 +275,18 @@ async function main(): Promise<void> {
     importErr = (e as Error).message;
   }
   assert(importErr.includes("no claudeAiOauth.accessToken"), "import without token");
+  assert(importErr.includes(badCreds), "missing-token error identifies the credentials file");
+  fs.writeFileSync(badCreds, "{broken-json");
+  try {
+    new ClaudeOAuth(path.join(tmp, "malformed-token.json")).importFromClaudeCode(badCreds);
+    throw new Error("expected malformed credentials to fail");
+  } catch (e) {
+    assert((e as Error).message.includes("not valid JSON") && (e as Error).message.includes(badCreds), "malformed JSON is distinguished from an unreadable file");
+  }
+  fs.writeFileSync(badCreds, "\uFEFF" + JSON.stringify({ claudeAiOauth: { accessToken: "bom-token", expiresAt: Date.now() + 3600_000 } }));
+  const bomOauth = new ClaudeOAuth(path.join(tmp, "bom-token.json"));
+  bomOauth.importFromClaudeCode(badCreds);
+  assert(await bomOauth.getAccessToken() === "bom-token", "UTF-8 BOM credentials import successfully");
   const cleared = new ClaudeOAuth(path.join(tmp, "t5.json"));
   cleared.importFromClaudeCode(ccFile);
   cleared.clear?.();

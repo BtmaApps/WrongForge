@@ -8,6 +8,9 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { mock } from "node:test";
+import { WebhookDispatcher, type DeliveryResult } from "../src/tasks/webhook.js";
+import type { TaskEvent } from "../src/tasks/types.js";
 import { assert, sleep, startHarness, startReceiver, type Harness } from "./helpers/harness.js";
 
 const tool = (name: string, input: unknown): string => `[[tool ${name} ${JSON.stringify(input)}]]`;
@@ -309,7 +312,38 @@ async function main(): Promise<void> {
     await h.close();
   }
 
-  console.log("TASKS CONCURRENCY TESTS PASSED ✓ (parallel isolation, env, heartbeat, queue, sessions, locks, no starvation, cancel, timeout, allowed roots, webhooks, live feed)");
+  // Closing during retry backoff cancels both the retry and queued followers.
+  {
+    let calls = 0;
+    let retrying!: () => void;
+    const reachedBackoff = new Promise<void>((r) => { retrying = r; });
+    const results: DeliveryResult[] = [];
+    const dispatcher = new WebhookDispatcher({
+      key: "shutdown-test-key", baseDelayMs: 60_000,
+      fetchImpl: async () => { calls++; return new Response("retry", { status: 500 }); },
+      logger: { warn: (type: string) => { if (type === "webhook.retry") retrying(); } } as never,
+    });
+    const ev: TaskEvent = { task_id: "shutdown-task", session_id: "shutdown-session", seq: 1, ts: new Date().toISOString(), type: "task.completed", data: {} };
+    mock.timers.enable({ apis: ["setTimeout"] });
+    try {
+      dispatcher.enqueue({ url: "http://127.0.0.1/hook" }, ev, (r) => results.push(r));
+      dispatcher.enqueue({ url: "http://127.0.0.1/hook" }, { ...ev, seq: 2 }, (r) => results.push(r));
+      await reachedBackoff;
+      assert(typeof dispatcher.close === "function", "webhook dispatcher exposes shutdown");
+      await dispatcher.close(); // must resolve without advancing the 60-second backoff
+      assert(calls === 1 && results.length === 2 && results.every((r) => !r.ok), "close cancels retry and queued follower without another request");
+      dispatcher.enqueue({ url: "http://127.0.0.1/hook" }, { ...ev, seq: 3 }, (r) => results.push(r));
+      assert(results.length === 3 && results[2]!.attempts === 0, "closed dispatcher refuses new deliveries synchronously");
+      mock.timers.tick(120_000);
+      await dispatcher.idle();
+      assert(calls === 1, "closed dispatcher never resumes retries");
+      await dispatcher.close(); // repeated close is harmless
+    } finally {
+      mock.timers.reset();
+    }
+  }
+
+  console.log("TASKS CONCURRENCY TESTS PASSED ✓ (parallel isolation, env, heartbeat, queue, sessions, locks, no starvation, cancel, timeout, allowed roots, webhooks, shutdown, live feed)");
 }
 
 main().then(
