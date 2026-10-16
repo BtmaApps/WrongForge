@@ -7,6 +7,7 @@ work, follow progress, survive failures. Field-by-field details are in
 - [Setup checklist](#setup-checklist)
 - [The basic loop](#the-basic-loop)
 - [Choosing how to follow a task](#choosing-how-to-follow-a-task)
+- [Models and reasoning effort](#models-and-reasoning-effort)
 - [Sessions: multi-step work](#sessions-multi-step-work)
 - [Parallel work and workdirs](#parallel-work-and-workdirs)
 - [Giving the agent more tools](#giving-the-agent-more-tools)
@@ -21,7 +22,11 @@ work, follow progress, survive failures. Field-by-field details are in
 1. **Sign in** on the machine that will run the agent: `npm run import` (reuses
    an existing Claude Code session) or `npm run login`. Or set
    `ANTHROPIC_API_KEY` to use a console API key instead (see the README's
-   privacy section for the trade-offs).
+   privacy section for the trade-offs). The sign-in self-heals: when the
+   subscription refresh token dies, WrongForge adopts Claude Code's own
+   session from `~/.claude/.credentials.json` automatically — the manual
+   `npm run import` ritual is only needed when Claude Code's token is dead
+   too (run Claude Code once, and the next WrongForge request recovers).
 2. **Pick the safety settings** before the first task — the agent runs shell
    commands as the server's user:
    - `WRONGFORGE_ALLOWED_ROOTS` — directories tasks may start in
@@ -31,7 +36,9 @@ work, follow progress, survive failures. Field-by-field details are in
      anything else.
 3. **Start it:** `npm run serve`. The banner shows the URL, the API key (the key
    is generated and saved on first start unless `AGENT_API_KEY` is set), the
-   model, the data/log directories and the concurrency.
+   model, the data/log directories and the concurrency — plus the **live
+   dashboard** URL (same origin, `/?key=<api key>`): traffic, tasks, model
+   round-trips, tool calls and plan usage on one screen.
 4. **Smoke test:**
    ```bash
    curl http://127.0.0.1:8787/health
@@ -41,7 +48,12 @@ work, follow progress, survive failures. Field-by-field details are in
    ```
 5. **Read `GET /v1/info`** from your client at startup: it tells you the default
    model, whether `workdir` is required, the allowed roots, limits and which
-   tools and guides are active.
+   tools and guides are active. Two newer fields worth knowing:
+   - `model_details` — per model: `id`, `description`, and `effort_levels`
+     (the reasoning-effort levels that model accepts; empty = none). Use it to
+     offer only valid choices and to validate before submitting.
+   - `workdir.suggestion` — a directory the server vouches for, handy for
+     smoke tests when no default workdir is configured.
 
 ## The basic loop
 
@@ -50,6 +62,9 @@ POST /v1/tasks            → 202 { task }            (queued)
    … follow progress …    ← events (SSE / long-poll / webhook)
 GET  /v1/tasks/:id        → task.status is terminal → read task.result / task.error
 ```
+
+Changed your mind mid-run? `POST /v1/tasks/:id/cancel` stops a queued or
+running task (reason optional); it ends in `cancelled` and its webhook fires.
 
 Always read the **terminal status** and decide on it:
 
@@ -82,6 +97,25 @@ Tips:
   `current_tool`, `last_report`, `todos`) if you only need status.
 - Use `cancel_on_disconnect: true` with `wait`/`stream` when the caller going
   away should also stop the work.
+- The **global feed** also carries `http.request` frames — every API call the
+  server handles, live (`{ts, method, path, status, duration_ms}`, never
+  persisted). On connect you first receive a replay of the last ≤300 frames as
+  a backlog burst; they carry their original timestamps, so order by `ts`, and
+  ignore the family entirely if you only care about task events.
+
+## Models and reasoning effort
+
+Per task, `effort` sets how hard the model thinks: `"low" | "medium" |
+"high" | "xhigh" | "max"` (server default `WRONGFORGE_EFFORT`, usually
+`high`), or `"off"` to never send it. What each model accepts is in
+`GET /v1/info` → `model_details[].effort_levels`; a level the model lacks is
+**clamped to its nearest supported one** and models without effort support
+never receive the field — so one setting works across the whole lineup and an
+invalid choice can never fail a task. The level actually sent is visible per
+model round-trip in the `step.request` event (`effort` in `data`). Effort is
+purely a request-shaping knob on the WrongForge side; you pay for it through
+output tokens, so prefer `low`/`medium` for high-volume mechanical jobs and
+`high`+ for design or debugging work.
 
 ## Sessions: multi-step work
 
@@ -319,6 +353,7 @@ webhook dispatcher and MCP pool. State is on disk under the data directory
 | `sessions/<id>/` | `session.json`, `messages.jsonl`, compaction archives |
 | `logs/` | daily JSONL logs, rolled over at `WRONGFORGE_LOG_MAX_MB` (50), gzip after 1 day, deleted after 30; secrets masked |
 | `mcp.json`, `api-key`, token store | configuration and secrets (0600 / encrypted) |
+| `effort-rejections.json` | models the API refused the `effort` field for (learned automatically, expires after 7 days) |
 
 **Logs.** One JSON object per line. `WRONGFORGE_LOG_LEVEL=debug` for more,
 `WRONGFORGE_LOG_STDERR=1` to mirror to the console. Every task event is logged
@@ -347,6 +382,7 @@ prompts are not fully trusted. There is no per-command approval.
 |---|---|
 | `401 unauthorized` | Missing/incorrect `Authorization: Bearer <key>`. The key is in the startup banner / `<data dir>/api-key` / `AGENT_API_KEY` |
 | `503 not_signed_in` | Run `npm run import` or `npm run login` on the server's machine (check `GET /health` → `signed_in`) |
+| Tasks fail with "token refresh failed" | WrongForge already tries to adopt Claude Code's session automatically; if that failed too, run Claude Code once (e.g. `claude -p OK`) so its token refreshes — the next WrongForge request recovers on its own. Manual: `npm run import` |
 | `400 workdir_required` | The server has no default workdir: pass `workdir`, or set `WRONGFORGE_WORKDIR` |
 | `403 workdir_not_allowed` | The directory is outside `WRONGFORGE_ALLOWED_ROOTS` (symlinks are resolved first) |
 | `400 invalid_gateway` … "host is not allowed" | Gateway URL is not loopback: add the host to `WRONGFORGE_GATEWAY_ALLOWED_HOSTS` |

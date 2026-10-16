@@ -610,6 +610,41 @@ body {
   text-align: right;
 }
 
+/* ------------------------------------------------------------ insights */
+
+.outcome-strip {
+  display: flex;
+  height: 26px;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+}
+
+.outcome-seg {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--bg);
+  white-space: nowrap;
+  overflow: hidden;
+  min-width: 3px;
+  transition: flex-grow 0.4s ease;
+}
+
+.ok-count {
+  color: var(--green);
+}
+
+.fail-count {
+  color: var(--red);
+}
+
+.tool-bar-cell {
+  width: 160px;
+}
+
 /* narrow screens: stack the panes instead of crushing them */
 @media (max-width: 1000px) {
   .overview {

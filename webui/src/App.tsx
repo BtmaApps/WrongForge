@@ -15,7 +15,7 @@ import { LiveFeed } from "./components/LiveFeed.js";
 import { TaskRail } from "./components/TaskRail.js";
 import { Inspector } from "./components/Inspector.js";
 import { SessionsView } from "./components/SessionsView.js";
-import { GraphView } from "./components/GraphView.js";
+import { InsightsView } from "./components/InsightsView.js";
 import { InfoView } from "./components/InfoView.js";
 
 export default function App() {
@@ -66,8 +66,8 @@ export default function App() {
               <Tabs.Trigger value="overview" className="tabs-trigger">
                 Overview
               </Tabs.Trigger>
-              <Tabs.Trigger value="graph" className="tabs-trigger">
-                Graph
+              <Tabs.Trigger value="insights" className="tabs-trigger">
+                Insights
               </Tabs.Trigger>
               <Tabs.Trigger value="sessions" className="tabs-trigger">
                 Sessions
@@ -83,8 +83,8 @@ export default function App() {
                 <Inspector taskId={openTaskId} onClose={() => setOpenTaskId(null)} />
               </div>
             </Tabs.Content>
-            <Tabs.Content value="graph" className="tabs-content tabs-graph">
-              <GraphView onOpenTask={pickTask} />
+            <Tabs.Content value="insights" className="tabs-content">
+              <InsightsView />
             </Tabs.Content>
             <Tabs.Content value="sessions" className="tabs-content">
               <SessionsView />
