@@ -4,6 +4,15 @@ Notable changes to WrongForge. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions match
 package.json and the git tags that drive the release workflow.
 
+## [Unreleased]
+
+### Added
+- **One-line installers** — `curl … install.sh | bash` (Linux/macOS) and
+  `irm … install.ps1 | iex` (Windows): sha256-verified download from the
+  latest release, PATH setup, macOS quarantine clearing. Release checksums
+  are now computed once over all platform binaries (SHA256SUMS.txt covers
+  every asset).
+
 ## [0.4.0] — 2026-10-16
 
 The binary release: WrongForge ships as a single executable, keeps itself

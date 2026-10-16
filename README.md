@@ -54,8 +54,20 @@ Source: [Models overview — Claude Platform Docs](https://platform.claude.com/d
 
 ## Setup
 
-**Binary (recommended)** — grab the executable from
-[github.com/WrongStack/WrongForge/releases](https://github.com/WrongStack/WrongForge/releases)
+**Binary (recommended)** — one line:
+
+```bash
+# Linux / macOS
+curl -fsSL https://raw.githubusercontent.com/WrongStack/WrongForge/main/scripts/install.sh | bash
+```
+
+```powershell
+# Windows
+irm https://raw.githubusercontent.com/WrongStack/WrongForge/main/scripts/install.ps1 | iex
+```
+
+Or grab an executable straight from
+[releases](https://github.com/WrongStack/WrongForge/releases)
 (`wrongforge-windows-x64.exe`, `wrongforge-linux-x64`,
 `wrongforge-macos-arm64` / `wrongforge-macos-x64`), then:
 

@@ -30,6 +30,21 @@ builds, sha256 checksums, assets attached to a GitHub Release
 (`WrongStack/WrongForge`). Asset names are the contract `wrongforge update`
 downloads — `wrongforge-<os>-<arch>[.exe]` (see `scripts/build-binary.mjs`).
 
+## One-line install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/WrongStack/WrongForge/main/scripts/install.sh | bash
+```
+
+```powershell
+irm https://raw.githubusercontent.com/WrongStack/WrongForge/main/scripts/install.ps1 | iex
+```
+
+Both verify the download against the release's SHA256SUMS.txt. Env overrides
+for install.sh: `WRONGFORGE_REPO`, `WRONGFORGE_VERSION`, `WRONGFORGE_INSTALL_DIR`
+(default `~/.local/bin`); install.ps1: `-Version`, `-Repo`, `-InstallDir`
+(default `%LOCALAPPDATA%ProgramsWrongForge`, added to the user PATH).
+
 ## Binary commands
 
 | Command | Meaning |

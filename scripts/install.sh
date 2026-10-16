@@ -18,14 +18,16 @@ arch="${WRONGFORGE_ARCH:-$(uname -m)}"
 case "$os" in
   Darwin) os="macos" ;;
   Linux) os="linux" ;;
+  windows) ;; # explicit override (testing from Git Bash)
   *) echo "unsupported OS: $os (set WRONGFORGE_OS to override)" >&2; exit 1 ;;
 esac
 case "$arch" in
-  x86_64|amd64) arch="x64" ;;
+  x86_64|amd64|x64) arch="x64" ;;
   aarch64|arm64) arch="arm64" ;;
   *) echo "unsupported architecture: $arch (set WRONGFORGE_ARCH to override)" >&2; exit 1 ;;
 esac
 asset="wrongforge-${os}-${arch}"
+[ "$os" = "windows" ] && asset="$asset.exe"
 
 # resolve the version (latest via the GitHub API unless pinned)
 if [ -z "${WRONGFORGE_VERSION:-}" ]; then
