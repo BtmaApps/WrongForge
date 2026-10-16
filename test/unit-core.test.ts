@@ -10,6 +10,7 @@ import * as fs from "node:fs";
 import * as http from "node:http";
 import * as os from "node:os";
 import * as path from "node:path";
+import { mock } from "node:test";
 import { gunzipSync } from "node:zlib";
 import { z } from "zod";
 import {
@@ -343,7 +344,7 @@ async function main(): Promise<void> {
   // F703: a tick must never start a pass while one is still running — two
   // overlapping passes compress the same log into the same <file>.gz.tmp.
   // Ordering comes from a latch (pass 1 is parked in taskStore.maintain), not
-  // from sleeps; the timers themselves are unref'ed, so hold the loop open.
+  // from sleeps; advance the scheduler clock explicitly.
   {
     let entered = 0;
     let maxConcurrent = 0;
@@ -364,16 +365,25 @@ async function main(): Promise<void> {
         return { compressed: [], deleted: [], errors: [] };
       },
     } as unknown as TaskStore;
-    const hold = setTimeout(() => undefined, 30_000);
-    const stopFast = startMaintenance({ logger: mlog, taskStore: parked, sessions: msessions, retention: retentionFromEnv({ WRONGFORGE_MAINTENANCE_INTERVAL_MIN: "0.002" }) });
-    await first;
-    await new Promise((r) => setTimeout(r, 500)); // several 120ms ticks elapse
-    assert(maxConcurrent === 1, `maintenance: overlapping passes (${maxConcurrent} in flight)`);
-    release?.();
-    await new Promise((r) => setTimeout(r, 100)); // let the pass unwind
-    stopFast();
-    clearTimeout(hold);
-    assert(entered === 0, `maintenance: parked pass released (entered=${entered})`);
+    const deps = { logger: mlog, taskStore: parked, sessions: msessions, retention: retentionFromEnv({ WRONGFORGE_MAINTENANCE_INTERVAL_MIN: "0.002" }) };
+    mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+    const stopFast = startMaintenance(deps);
+    try {
+      mock.timers.tick(120);
+      await first;
+      mock.timers.tick(500); // several scheduler ticks while the pass is parked
+      assert(maxConcurrent === 1, `maintenance: overlapping passes (${maxConcurrent} in flight)`);
+      // Stop future ticks BEFORE releasing the pass. Otherwise a legitimate
+      // second pass may start during the old test's 100ms sleep and park again.
+      stopFast();
+      const finished = runMaintenance(deps); // join the already-running pass
+      release?.();
+      await finished;
+      assert(entered === 0, `maintenance: parked pass released (entered=${entered})`);
+    } finally {
+      stopFast();
+      mock.timers.reset();
+    }
   }
 
   // F931: `runMaintenance` is reachable from outside the scheduler —
