@@ -25,7 +25,7 @@ no other runtime services are needed.
 
 ## Contents
 
-- [Models](#models) · [Setup](#setup) · [Usage](#usage)
+- [Models](#models) · [Installation](#installation) · [Usage](#usage)
 - [Privacy — what is sent](#privacy--what-is-sent-to-the-other-side)
 - [Tools](#tools) · [MCP servers](#mcp-servers) · [Tool gateway](#tool-gateway)
 - [HTTP task API](#http-task-api) · [Sessions & context](#sessions--context-management)
@@ -52,9 +52,9 @@ snapshots. This list is the built-in fallback (`KNOWN_MODELS` in
 REPL — it queries `GET /v1/models` with your credentials.
 Source: [Models overview — Claude Platform Docs](https://platform.claude.com/docs/en/models/overview).
 
-## Setup
+## Installation
 
-**Binary (recommended)** — one line:
+**One line (recommended):**
 
 ```bash
 # Linux / macOS
@@ -66,10 +66,18 @@ curl -fsSL https://raw.githubusercontent.com/WrongStack/WrongForge/main/scripts/
 irm https://raw.githubusercontent.com/WrongStack/WrongForge/main/scripts/install.ps1 | iex
 ```
 
-Or grab an executable straight from
-[releases](https://github.com/WrongStack/WrongForge/releases)
-(`wrongforge-windows-x64.exe`, `wrongforge-linux-x64`,
-`wrongforge-macos-arm64` / `wrongforge-macos-x64`), then:
+**Manual download** — pick the asset for your platform from
+[releases](https://github.com/WrongStack/WrongForge/releases), put it on your
+PATH and make it executable (`chmod +x`):
+
+| Platform | Asset |
+|---|---|
+| Windows x64 | `wrongforge-windows-x64.exe` |
+| Linux x64 | `wrongforge-linux-x64` |
+| macOS Apple Silicon | `wrongforge-macos-arm64` |
+| macOS Intel | `wrongforge-macos-x64` |
+
+Then:
 
 ```bash
 wrongforge import      # reuse your existing Claude Code session
@@ -83,11 +91,22 @@ macOS the binary is unsigned — clear Gatekeeper once with
 `wrongforge update` keeps it current (checks run at startup and daily;
 `WRONGFORGE_UPDATE_CHECK=0` disables). More: [docs/RELEASE.md](docs/RELEASE.md).
 
-**From source:**
+**From source** (Node 24+):
 
 ```bash
-npm install
-npm run config:init    # writes ~/.wrongforge/oauth.json from the example
+git clone https://github.com/WrongStack/WrongForge.git && cd WrongForge
+npm install                    # the server/CLI
+npm --prefix webui install     # dashboard build prerequisite (once)
+npm run config:init            # writes ~/.wrongforge/oauth.json from the example
+npm run webui:build            # the dashboard served at / by `serve` (optional
+                               # but recommended; skip = the API still works)
+```
+
+**Build the binary yourself** (what the releases contain — needs
+[bun](https://bun.sh)):
+
+```bash
+npm run build:binary    # → release/wrongforge-<os>-<arch>[.exe], webui embedded
 ```
 
 The OAuth client registration (client ID, endpoints, scope) is **not part of
