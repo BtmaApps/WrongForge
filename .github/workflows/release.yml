@@ -46,6 +46,7 @@ jobs:
         run: |
           npm run typecheck
           npm test
+          npm run test:install
 
       - name: Build binary (webui + embed + bun compile)
         run: npm run build:binary

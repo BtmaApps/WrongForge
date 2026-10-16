@@ -58,24 +58,51 @@ if [ -s "$tmp/SHA256SUMS.txt" ]; then
 fi
 
 mkdir -p "$DEST" 2>/dev/null || true
-if ! mv "$tmp/$asset" "$DEST/$asset" 2>/dev/null; then
+# Always expose the same command, regardless of the release asset's name.
+command_name=wrongforge
+[ "$os" = "windows" ] && command_name=wrongforge.exe
+chmod +x "$tmp/$asset"
+if ! mv "$tmp/$asset" "$DEST/$command_name" 2>/dev/null; then
   if command -v sudo >/dev/null 2>&1; then
     echo "→ $DEST not writable; retrying with sudo"
-    sudo mv "$tmp/$asset" "$DEST/$asset"
+    sudo mkdir -p "$DEST"
+    sudo mv "$tmp/$asset" "$DEST/$command_name"
   else
     echo "cannot write to $DEST — set WRONGFORGE_INSTALL_DIR" >&2; exit 1
   fi
 fi
-chmod +x "$DEST/$asset"
+# Persist an absolute path so the command also works from other directories.
+DEST="$(cd "$DEST" && pwd -P)"
 
 # macOS: clear the quarantine flag the unsigned binary carries
 if [ "$os" = "macos" ] && command -v xattr >/dev/null 2>&1; then
-  xattr -d com.apple.quarantine "$DEST/$asset" 2>/dev/null || true
+  xattr -d com.apple.quarantine "$DEST/$command_name" 2>/dev/null || true
 fi
 
-case ":$PATH:" in
-  *":$DEST:"*) ;;
-  *) echo "note: $DEST is not on your PATH — add it to use 'wrongforge' everywhere" ;;
-esac
-echo "✓ installed: $DEST/$asset"
-"$DEST/$asset" version
+# Quote literal paths, including spaces, dollar signs and apostrophes.
+quoted_dest="'$(printf '%s' "$DEST" | sed "s/'/'\\\\''/g")'"
+path_line="export PATH=$quoted_dest:\$PATH # WrongForge PATH"
+add_path() {
+  local profile="$1"
+  mkdir -p "$(dirname "$profile")"
+  if ! grep -Fqx "$path_line" "$profile" 2>/dev/null; then
+    printf '\n%s\n' "$path_line" >> "$profile"
+  fi
+}
+# Bash login shells read .profile only when neither of these exists.
+add_path "$HOME/.profile"
+add_path "$HOME/.bashrc"
+if [ -f "$HOME/.bash_profile" ]; then add_path "$HOME/.bash_profile"
+elif [ -f "$HOME/.bash_login" ]; then add_path "$HOME/.bash_login"; fi
+add_path "${ZDOTDIR:-$HOME}/.zprofile"
+add_path "${ZDOTDIR:-$HOME}/.zshrc"
+fish_dir="${XDG_CONFIG_HOME:-$HOME/.config}/fish/conf.d"
+mkdir -p "$fish_dir"
+# Fish single quotes escape both backslashes and apostrophes.
+fish_dest="$(printf '%s' "$DEST" | sed "s/\\\\/\\\\\\\\/g; s/'/\\\\'/g")"
+printf "fish_add_path --prepend --path '%s'\n" "$fish_dest" > "$fish_dir/wrongforge.fish"
+export PATH="$DEST:$PATH"
+echo "✓ installed: $DEST/$command_name"
+"$DEST/$command_name" version
+echo "✓ PATH configured for bash, zsh and fish; open a new terminal to run wrongforge anywhere"
+echo "  To use it in this terminal now: $path_line"

@@ -66,9 +66,17 @@ curl -fsSL https://raw.githubusercontent.com/WrongStack/WrongForge/main/scripts/
 irm https://raw.githubusercontent.com/WrongStack/WrongForge/main/scripts/install.ps1 | iex
 ```
 
+The installer exposes the command as `wrongforge` from any directory. Windows
+updates both the current PowerShell session and your user PATH. Linux/macOS
+installs to `~/.local/bin/wrongforge` and configures bash, zsh and fish startup
+files automatically; open a new terminal afterward, or run the `export PATH=…`
+line printed by the installer in your current shell (bash/zsh).
+
 **Manual download** — pick the asset for your platform from
 [releases](https://github.com/WrongStack/WrongForge/releases), put it on your
-PATH and make it executable (`chmod +x`):
+PATH and make it executable (`chmod +x`).
+
+Rename the downloaded asset to `wrongforge` (`wrongforge.exe` on Windows).
 
 | Platform | Asset |
 |---|---|

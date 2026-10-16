@@ -12,6 +12,17 @@ param(
 )
 $ErrorActionPreference = "Stop"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+# Resolve custom relative paths before persisting them in PATH.
+$InstallDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($InstallDir)
+if ($InstallDir -ne [IO.Path]::GetPathRoot($InstallDir)) { $InstallDir = $InstallDir.TrimEnd('\', '/') }
+
+function Add-WrongForgePath([string]$ExistingPath) {
+  # Compare complete entries, not substrings (e.g. WrongForge-old).
+  $entries = @($ExistingPath -split ';' | Where-Object {
+    $_ -and [Environment]::ExpandEnvironmentVariables($_.Trim().Trim('"')).TrimEnd('\', '/') -ine $InstallDir
+  })
+  return (@($InstallDir) + $entries) -join ';'
+}
 
 $asset = "wrongforge-windows-x64.exe"
 
@@ -43,13 +54,35 @@ try {
 
   # user PATH (idempotent, no admin)
   $path = [Environment]::GetEnvironmentVariable("Path", "User")
-  if ($path -notlike "*$InstallDir*") {
-    [Environment]::SetEnvironmentVariable("Path", "$path;$InstallDir", "User")
-    Write-Host "note: added $InstallDir to your user PATH - open a NEW terminal for it to apply"
+  $newPath = Add-WrongForgePath $path
+  if ($path -cne $newPath) {
+    [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
+    # Notify Explorer so terminals launched from the desktop inherit the change.
+    if (-not ('WrongForge.EnvironmentNotification' -as [type])) {
+      Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+namespace WrongForge {
+  public static class EnvironmentNotification {
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern IntPtr SendMessageTimeout(IntPtr window, uint message,
+      UIntPtr wParam, string lParam, uint flags, uint timeout, out UIntPtr result);
   }
+}
+'@
+    }
+    $notificationResult = [UIntPtr]::Zero
+    [void][WrongForge.EnvironmentNotification]::SendMessageTimeout(
+      [IntPtr]0xffff, 0x001a, [UIntPtr]::Zero, "Environment", 2, 1000, [ref]$notificationResult)
+  }
+  # Also fix the installing shell and all processes started from it.
+  $env:Path = Add-WrongForgePath $env:Path
 
   Write-Host "+ installed: $InstallDir\wrongforge.exe"
   & "$InstallDir\wrongforge.exe" version
+  if ($LASTEXITCODE -ne 0) { throw "Installed wrongforge failed its version check (exit $LASTEXITCODE)" }
+  Write-Host "+ ready: wrongforge (current terminal and future terminals)"
+  Write-Host "note: other already-open terminals may need restarting to refresh PATH"
 } finally {
   Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
 }

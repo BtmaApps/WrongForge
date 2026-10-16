@@ -43,7 +43,13 @@ irm https://raw.githubusercontent.com/WrongStack/WrongForge/main/scripts/install
 Both verify the download against the release's SHA256SUMS.txt. Env overrides
 for install.sh: `WRONGFORGE_REPO`, `WRONGFORGE_VERSION`, `WRONGFORGE_INSTALL_DIR`
 (default `~/.local/bin`); install.ps1: `-Version`, `-Repo`, `-InstallDir`
-(default `%LOCALAPPDATA%ProgramsWrongForge`, added to the user PATH).
+(default `%LOCALAPPDATA%\Programs\WrongForge`, added to the user and current
+PowerShell PATH). Both installers expose `wrongforge` regardless of the asset
+name. Unix installs `~/.local/bin/wrongforge` and adds its absolute directory
+to bash, zsh and fish startup files. Open a new terminal on Unix or use the
+printed export command in bash/zsh. Existing unrelated terminals may need
+restarting on Windows. Custom install directories are supported, including
+paths containing spaces.
 
 ## Binary commands
 
