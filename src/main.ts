@@ -115,10 +115,14 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
   }
 
   if (cmd === "models") {
+    const effortNote = (id: string): string => {
+      const levels = effortSupport(id);
+      return levels.length ? `  [effort: ${levels.join("|")}]` : "  [effort: —]";
+    };
     if (!oauth.signedIn) {
       console.log("Not signed in — known models (run `npm run login` for the live list):");
       for (const [id, desc] of Object.entries(KNOWN_MODELS)) {
-        console.log(`- ${id}: ${desc}`);
+        console.log(`- ${id}: ${desc}${effortNote(id)}`);
       }
       return;
     }
@@ -126,13 +130,13 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
     if (!res.ok) {
       console.log(`Could not fetch the live list (${res.error}). Known models:`);
       for (const [id, desc] of Object.entries(KNOWN_MODELS)) {
-        console.log(`- ${id}: ${desc}`);
+        console.log(`- ${id}: ${desc}${effortNote(id)}`);
       }
       return;
     }
     console.log(`Models available to your account (${res.models.length}):\n`);
     for (const m of res.models) {
-      console.log(`- ${m.id}${m.display_name !== m.id ? `  (${m.display_name})` : ""}`);
+      console.log(`- ${m.id}${m.display_name !== m.id ? `  (${m.display_name})` : ""}${effortNote(m.id)}`);
     }
     return;
   }

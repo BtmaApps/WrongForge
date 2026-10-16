@@ -16,6 +16,7 @@ import { TaskRail } from "./components/TaskRail.js";
 import { Inspector } from "./components/Inspector.js";
 import { SessionsView } from "./components/SessionsView.js";
 import { GraphView } from "./components/GraphView.js";
+import { InfoView } from "./components/InfoView.js";
 
 export default function App() {
   const conn = useStore((s) => s.conn);
@@ -71,6 +72,9 @@ export default function App() {
               <Tabs.Trigger value="sessions" className="tabs-trigger">
                 Sessions
               </Tabs.Trigger>
+              <Tabs.Trigger value="info" className="tabs-trigger">
+                Info
+              </Tabs.Trigger>
             </Tabs.List>
             <Tabs.Content value="overview" className="tabs-content">
               <div className="overview">
@@ -84,6 +88,9 @@ export default function App() {
             </Tabs.Content>
             <Tabs.Content value="sessions" className="tabs-content">
               <SessionsView />
+            </Tabs.Content>
+            <Tabs.Content value="info" className="tabs-content">
+              <InfoView />
             </Tabs.Content>
           </Tabs.Root>
         )}

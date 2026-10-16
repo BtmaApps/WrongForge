@@ -28,6 +28,7 @@ import { createApp, type App } from "./app.js";
 import { fetchPlanUsage } from "./usage.js";
 import { agentTools } from "./tools/index.js";
 import { DEFAULT_MODEL, KNOWN_MODELS } from "./agent.js";
+import { effortSupport } from "./effort.js";
 import { APP_NAME, VERSION, dataDir } from "./paths.js";
 import { resolveApiKey } from "./apikey.js";
 import { printBanner } from "./banner.js";
@@ -453,6 +454,14 @@ export function createAgentServer(opts: ServerOptions): http.Server {
       signed_in: oauth.signedIn,
       default_model: app.defaultModel,
       models: Object.keys(KNOWN_MODELS),
+      /** Per-model facts an orchestrator needs before submitting: which
+       * effort levels each model accepts (empty = no effort support — mirrors
+       * the capability shape Claude Code's own catalog serves). */
+      model_details: Object.entries(KNOWN_MODELS).map(([id, description]) => ({
+        id,
+        description,
+        effort_levels: [...effortSupport(id)],
+      })),
       queue: { ...c, max_concurrency: manager.maxConcurrency },
       workdir: {
         default: app.defaultWorkdir ?? null,

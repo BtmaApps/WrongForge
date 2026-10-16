@@ -33,6 +33,11 @@ async function main(): Promise<void> {
   assert((await fetch(`${h.base}/v1/info`, { headers: { Authorization: "Bearer wrong-key-wrong-key" } })).status === 401, "401 with a wrong key");
   const info = (await h.api("GET", "/v1/info")).body;
   assert(info.protocol === 1 && info.workdir.required === true && info.default_model === "claude-sonnet-5-5", "info: protocol, workdir required, model");
+  const detail = (info.model_details ?? []).find((m: any) => m.id === "claude-sonnet-5-5");
+  assert(
+    detail && Array.isArray(detail.effort_levels) && detail.effort_levels.join(",") === "low,medium,high,xhigh,max" && typeof detail.description === "string",
+    "info.model_details carries per-model effort levels (5 for sonnet-5-5)",
+  );
   assert(info.tools.includes("report_progress") && info.tools.includes("mcp_call") && info.cache.default === "1h", "info lists tools and cache default");
   assert(info.effort.default === "high" && info.features.includes("effort"), "info lists the effort default and feature");
   assert((await h.api("GET", "/v1/tools")).body.tools.some((t: any) => t.name === "bash"), "/v1/tools");

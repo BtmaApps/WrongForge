@@ -101,6 +101,8 @@ export interface Info {
   signed_in: boolean;
   default_model: string;
   models: string[];
+  /** /v1/info also serves per-model facts (effort support) for orchestrators. */
+  model_details?: Array<{ id: string; description: string; effort_levels: string[] }>;
   queue: { queued: number; running: number; max_concurrency: number } & Record<string, number>;
   workdir: { default: string | null; required: boolean; allowed_roots?: string[]; lock_by_default: boolean; suggestion?: string | null };
   context: { window: number; compact_at: number; clear_at: number; keep_turns: number };
@@ -109,6 +111,9 @@ export interface Info {
   tools: string[];
   tool_guides: string[];
   mcp: { config_file: string; servers: number };
+  limits: { max_body_bytes: number; max_steps: number; default_max_steps: number };
+  webhook: { signature: string; key: string };
+  dirs: { home: string; logs: string; tasks: string; sessions: string };
 }
 
 export const TERMINAL: TaskStatus[] = ["completed", "failed", "cancelled", "timed_out"];

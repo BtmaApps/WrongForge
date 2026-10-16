@@ -414,7 +414,7 @@ old history may no longer apply.
 | Endpoint | Meaning |
 |---|---|
 | `GET /health` | **No auth.** `{ ok, name, version, signed_in, queued, running }` |
-| `GET /v1/info` | Capabilities and effective settings: `name`, `version`, `protocol` (1), `signed_in`, `default_model`, `models`, `queue` (`queued`, `running`, `max_concurrency`), `workdir` (`default`, `required`, `allowed_roots`, `lock_by_default`), `context`, `cache`, `effort` (`default`, `levels`), `limits` (`max_body_bytes`, `max_steps`, `default_max_steps`), `webhook` (signature scheme, which key), `tools`, `tool_guides`, `mcp` (config file, server count), `dirs` |
+| `GET /v1/info` | Capabilities and effective settings: `name`, `version`, `protocol` (1), `signed_in`, `default_model`, `models` (ids), `model_details` (per model: `id`, `description`, `effort_levels` — empty when the model has no effort support), `queue` (`queued`, `running`, `max_concurrency`), `workdir` (`default`, `required`, `allowed_roots`, `lock_by_default`), `context`, `cache`, `effort` (`default`, `levels`), `limits` (`max_body_bytes`, `max_steps`, `default_max_steps`), `webhook` (signature scheme, which key), `tools`, `tool_guides`, `mcp` (config file, server count), `dirs` |
 | `GET /v1/tools` | `{ "tools": [{ name, description }] }` — the built-in tools |
 | `GET /v1/usage` | Plan usage of the signed-in subscription (`five_hour`, `weekly`, `extra_usage`), cached 5 min; `?force=1` bypasses the cache; `502 usage_unavailable` if it cannot be read |
 | `POST /v1/maintenance/run` | Run housekeeping now (log/task compression and retention, session pruning). Live tasks and busy sessions are never touched |
