@@ -232,7 +232,7 @@ Queue state is visible in `GET /health` (`queued`, `running`) and `GET /v1/info`
 | `step.started` | `step` |
 | `step.request` | `step`, `model`, `effort` (resolved, null when omitted), `max_tokens`, `messages`, `tools` — what this step sends to the model |
 | `step.finished` | `step`, `finish_reason`, `usage`, `context_tokens` |
-| `tools.loaded` | `source` (`discovery` \| `inline` \| `mcp`), `count`, `tools`, `hash`, `warnings`, plus `url`/`cached`/`error` (gateway) or `servers` (MCP) |
+| `tools.loaded` | `source` (`discovery` \| `inline` \| `mcp`), `count`, `tools`, `hash`, `warnings`, plus `url`/`cached`/`error` (gateway) or `servers` (MCP); gateway loads also carry `shadowed` — the built-ins hidden because the orchestrator provides a `<prefix><name>` twin |
 | `session.compacting` | `reason` (`threshold` \| `flagged_after_overflow` \| `context_overflow`), `context_tokens`, `threshold`, `messages`, `keep_turns` |
 | `session.compacted` | `compacted`, `messages_before`, `messages_after`, `turns_summarized`, `turns_kept`, `summary_chars`, `archive` |
 | `context.cleared` | `cleared`, `context_tokens` — old tool outputs replaced by a placeholder |
@@ -295,8 +295,12 @@ data: {"task_id":"tsk_…","status":"completed"}
 
 ### `GET /v1/events`
 
-Live SSE feed of **all** tasks (no replay): `?task_id=` and `?session_id=` filter
-it. Events have no `id:`. Use it for dashboards.
+Live SSE feed of **all** tasks: `?task_id=` and `?session_id=` filter it. Events
+have no `id:`. Use it for dashboards. On connect the feed first replays its
+backlog — the last ≤300 `http.request` frames (in-memory) and the newest ≤300
+task events read from disk (heartbeats skipped; survives serve restarts) —
+then continues live. `http.request` frames are fire-and-forget traffic views
+(`{ts, method, path, status, duration_ms}`), never part of the task protocol.
 
 The feed also carries `http.request` frames — `{ type, ts, method, path,
 status, duration_ms }` for every `/v1` call as it completes (the stream itself

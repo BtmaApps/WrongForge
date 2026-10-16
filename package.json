@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "license": "MIT",
-  "description": "WrongForge — standalone agentic tool that performs Claude Code-style operations for WrongStack (CLI + HTTP API with live tool-call stream), built on the Vercel AI SDK",
+  "description": "WrongForge — standalone agentic worker for WrongStack (single-file binary or source; CLI + HTTP task API with live dashboard), built on the official Anthropic SDK",
   "bin": {
     "wrongforge": "./src/main.ts"
   },

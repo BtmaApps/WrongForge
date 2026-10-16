@@ -56,7 +56,8 @@ Source: [Models overview — Claude Platform Docs](https://platform.claude.com/d
 
 **Binary (recommended)** — grab the executable from
 [github.com/WrongStack/WrongForge/releases](https://github.com/WrongStack/WrongForge/releases)
-(`wrongforge-windows-x64.exe` / `wrongforge-linux-x64`), then:
+(`wrongforge-windows-x64.exe`, `wrongforge-linux-x64`,
+`wrongforge-macos-arm64` / `wrongforge-macos-x64`), then:
 
 ```bash
 wrongforge import      # reuse your existing Claude Code session
@@ -64,7 +65,9 @@ wrongforge serve      # HTTP task API + dashboard on :8787
 wrongforge update     # later: install the newest release (sha256-verified)
 ```
 
-Self-contained: the dashboard and the default tool guides are embedded.
+Self-contained: the dashboard and the default tool guides are embedded. On
+macOS the binary is unsigned — clear Gatekeeper once with
+`xattr -d com.apple.quarantine wrongforge-macos-*`.
 `wrongforge update` keeps it current (checks run at startup and daily;
 `WRONGFORGE_UPDATE_CHECK=0` disables). More: [docs/RELEASE.md](docs/RELEASE.md).
 
@@ -115,26 +118,36 @@ there — `GET /v1/tasks 200 2ms`, `● task.started`, `⇢ step.request …`,
 traffic without opening anything else (heartbeats are skipped; `NO_COLOR`
 disables the colors; `WRONGFORGE_LIVE=0` turns it off).
 
-**Live dashboard** (`npm run webui:build` once, then open `http://127.0.0.1:8787/`
-while the server runs): a React + Radix UI single page that streams the global
-`/v1/events` feed over SSE and shows everything as it happens — a filterable
-live event firehose (per step: what went out to the model — model, effort,
-message/tool counts — and what came back — text, tool calls with inputs and
-outputs, usage), incoming HTTP traffic as `http.request` frames (every `/v1`
-call, method/path/status/duration — the feed visibly ticks even while no task
-runs), a task table with a per-step detail view, sessions with context usage
-and stored messages, plan usage, and a React Flow graph of the whole system
-(WrongStack → tasks → models ↔ tools, workdirs) where active edges animate.
-The feed is live-only but seeded with the newest tasks' recent events on
-connect, so the page opens with history instead of an empty screen. The
-browser asks for the server API key once (`?key=` on the URL also works —
-browsers cannot set headers on EventSource); only the shell is public, all
-data stays behind the key.
+```
+┌ status bar: live · idle · rpm · tokens · last request ── [▶ test task] ┐
+├ TASKS       │ LIVE FEED                  │ SELECTED TASK / SYSTEM      │
+│ rail:       │ http rows + task events    │ per-step model round-trips, │
+│ status, id, │ (step.request/finished,    │ tool calls with io, agent   │
+│ prompt,     │ tool.started/finished,     │ text — or the system panel  │
+│ cancel ✕    │ agent.text)                │ (models, usage, tools)      │
+└─────────────┴────────────────────────────┴─────────────────────────────┘
+```
+
+**Live dashboard** — open `http://127.0.0.1:8787/` while the server runs
+(embedded in the binary; from source, `npm run webui:build` once). One screen,
+four tabs: **Overview** (the control room above — task rail, live feed,
+inspector), **Insights** (per-model usage and outcomes, tool activity),
+**Sessions** and **Info** (models with their effort levels, plan usage, limits,
+tools, storage). The feed replays its backlog on connect — the last ≤300 HTTP
+requests AND the newest ≤300 task events **from disk**, so it survives serve
+restarts and shows what ran while you were away. Buttons on the feed run a
+test request or a tiny test task on demand; running tasks can be cancelled
+from the rail. The browser asks for the server API key once (`?key=` on the
+URL also works — browsers cannot set headers on EventSource); only the shell
+is public, all data stays behind the key.
 
 `npm run import` reads `claudeAiOauth` from `~/.claude/.credentials.json`
 (Claude Code CLI's stored session) into this app's encrypted token store. The
 token refreshes through the same endpoint when it expires, so a single import
-keeps working. If Claude Code re-logins, run `npm run import` again.
+keeps working — and when the refresh token dies, WrongForge adopts Claude
+  Code's current session from `~/.claude/.credentials.json` automatically;
+  `npm run import` is only needed when Claude Code's own token is dead too
+  (run Claude Code once and the next request recovers).
 
 > Loopback redirects (`http://127.0.0.1:…/callback`) are **not supported** for
 > this client: the server rejects them. The only registered redirect is
@@ -162,7 +175,9 @@ is what leaves your machine:
 | authorize URL | `client_id` (from your config), `redirect_uri`, `scope`, one-time PKCE `code_challenge` + `state` |
 | token endpoint | `grant_type`, `client_id`, `code` / `refresh_token`, `redirect_uri`, `code_verifier`, `scope` (JSON body) |
 | `POST /v1/messages` | `Authorization: Bearer <token>`, `anthropic-version`, the beta list below, the conversation, the tool definitions, and the identification described next |
+| `GET /api/hello` | startup liveness ping, no auth (as Claude Code does) |
 | `GET /api/claude_cli/bootstrap` | once per process at startup (as Claude Code does); returns the account UUID |
+| `POST /v1/messages/count_tokens` | before every streaming turn (as Claude Code does): model, messages, tools |
 | `GET /v1/models`, `GET /api/oauth/usage` | only when you ask for models / usage; Bearer token |
 
 Identification on `/v1/messages` (OAuth mode only):
@@ -170,18 +185,25 @@ Identification on `/v1/messages` (OAuth mode only):
 - **Headers:** `User-Agent: claude-cli/2.1.300 (external, sdk-cli)`, `x-app: cli`,
   `x-claude-code-session-id` (random per process, never stored),
   `anthropic-dangerous-direct-browser-access`, and the `x-stainless-*` set —
-  which includes your **OS, CPU architecture and Node.js version**.
+  OS and CPU architecture are real; the runtime version is pinned to Claude
+  Code's (`v26.3.0`) rather than your Node's.
 - **`metadata.user_id`:** JSON with a **persistent random `device_id`** (64 hex
   chars, created once in `~/.wrongforge/user-id`), your **`account_uuid`**
   (cached in `~/.wrongforge/account-uuid`) and the per-process session id.
+- **Body shape:** `thinking: adaptive`, a `context_management` edit list, a
+  `safeguards` dangerous-tool-use classifier context (carries the task's
+  working directory and your OS username), `output_config.effort`, and
+  `max_tokens: 128000` on main turns — matching the captured client. Each of
+  these self-heals away with a retry if an endpoint ever refuses it.
 - **System prompt:** two fixed leading blocks — a billing marker
   (`x-anthropic-billing-header: cc_version=…; cc_entrypoint=sdk-cli;`) and
   `You are a Claude agent, built on Anthropic's Claude Agent SDK.` — followed by
   this app's own prompt.
-- **Betas:** `claude-code-20250219`, `oauth-2025-04-20`,
-  `interleaved-thinking-2025-05-14`, `context-management-2025-06-27`,
-  `dangerous-tool-use-2026-09-03`. Without the last two the API answers
-  `400 "Third-party apps now draw from your extra usage"`.
+- **Betas:** the exact 15-item list a captured Claude Code 2.1.300 request
+  carries, in the same order (incl. `context-management-2025-06-27` and
+  `dangerous-tool-use-2026-09-03` — without those two the API answers
+  `400 "Third-party apps now draw from your extra usage"` — and
+  `effort-2025-11-24`, which gates the `output_config.effort` field).
 - Requests go to `POST /v1/messages?beta=true`.
 
 Tokens are never printed or logged. With `ANTHROPIC_API_KEY` set, none of the
