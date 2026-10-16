@@ -1,17 +1,27 @@
 # WrongForge
 
+> [!WARNING]
+> **Experimental software, provided as-is.** No warranty of any kind — express
+> or implied. The authors and contributors accept no liability for any damage,
+> data loss, account actions or other consequences of using this software.
+> It runs shell commands and edits files on your machine, drives your Claude
+> account, and depends on undocumented client behavior that may change without
+> notice. Use at your own risk; review the code before trusting it.
+
 A standalone agent for WrongStack that performs Claude Code-style work
 (shell, files, search, web, MCP) and exposes it two ways:
 
-- a **chat REPL** (`npm start`), and
-- an **HTTP task API** (`npm run serve`) — an orchestrator submits tasks, the
-  agent works on them and every step is streamed back as events (SSE, long-poll
-  or signed webhooks).
+- a **chat REPL**, and
+- an **HTTP task API** — an orchestrator submits tasks, the agent works on
+  them and every step is streamed back as events (SSE, long-poll or signed
+  webhooks), with a **live dashboard** on top.
 
-It signs in with Claude (OAuth) and talks to `api.anthropic.com` with Bearer
-tokens, or — alternatively — with a regular console API key. Built on the
-official Anthropic SDK (`@anthropic-ai/sdk`), `zod` and the MCP SDK; no other
-runtime services are needed.
+It ships as a **single-file executable** (dashboard and guides embedded, MIT
+licensed — see [releases](https://github.com/WrongStack/WrongForge/releases))
+or runs from source on Node/TypeScript. It signs in with your Claude account
+(OAuth) and talks to `api.anthropic.com` with Bearer tokens, or with a regular
+console API key. Built on the official Anthropic SDK, `zod` and the MCP SDK;
+no other runtime services are needed.
 
 ## Contents
 
@@ -24,7 +34,8 @@ runtime services are needed.
 
 **Documentation:** [docs/TASKS-API.md](docs/TASKS-API.md) (protocol reference) ·
 [docs/INTEGRATION.md](docs/INTEGRATION.md) (client guide) ·
-[docs/TOOL-GATEWAY.md](docs/TOOL-GATEWAY.md) · [docs/MCP.md](docs/MCP.md)
+[docs/TOOL-GATEWAY.md](docs/TOOL-GATEWAY.md) · [docs/MCP.md](docs/MCP.md) ·
+[docs/RELEASE.md](docs/RELEASE.md) (binaries & self-update) · [CHANGELOG.md](CHANGELOG.md)
 
 ## Models
 
@@ -42,6 +53,22 @@ REPL — it queries `GET /v1/models` with your credentials.
 Source: [Models overview — Claude Platform Docs](https://platform.claude.com/docs/en/models/overview).
 
 ## Setup
+
+**Binary (recommended)** — grab the executable from
+[github.com/WrongStack/WrongForge/releases](https://github.com/WrongStack/WrongForge/releases)
+(`wrongforge-windows-x64.exe` / `wrongforge-linux-x64`), then:
+
+```bash
+wrongforge import      # reuse your existing Claude Code session
+wrongforge serve      # HTTP task API + dashboard on :8787
+wrongforge update     # later: install the newest release (sha256-verified)
+```
+
+Self-contained: the dashboard and the default tool guides are embedded.
+`wrongforge update` keeps it current (checks run at startup and daily;
+`WRONGFORGE_UPDATE_CHECK=0` disables). More: [docs/RELEASE.md](docs/RELEASE.md).
+
+**From source:**
 
 ```bash
 npm install
@@ -62,6 +89,10 @@ OAuth/Claude Code client signature described below is then bypassed entirely
 and requests bill to the key's credits instead of a subscription.
 
 ## Usage
+
+From a binary, the same commands run without `npm run` (`wrongforge import`,
+`wrongforge serve`, …; plus `wrongforge update` and `wrongforge version`).
+From source:
 
 ```bash
 npm run import            # reuse your existing Claude Code session (no login needed)
@@ -115,8 +146,9 @@ keeps working. If Claude Code re-logins, run `npm run import` again.
 interrupts a running turn (the turn is discarded from the history); when idle it
 quits. The REPL runs up to 20 model steps per turn. Default model is
 `claude-sonnet-5-5`; override with `CLAUDE_MODEL` or `/model`. Reasoning
-effort defaults to `WRONGFORGE_EFFORT` (high); `/effort low|medium|high|off`
-changes it for the session (clamped to what the model supports).
+effort defaults to `WRONGFORGE_EFFORT` (high); `/effort low|medium|high|xhigh|max|off`
+changes it for the session (clamped to what the model supports — the levels
+per model are in `/v1/info` → `model_details`).
 
 ## Privacy — what is sent to the other side
 
@@ -281,7 +313,7 @@ recovered at startup.
 `max_steps` (1–500, default 50), `timeout_ms` (default 30 min), `workdir`
 (required unless `WRONGFORGE_WORKDIR` is set; checked against
 `WRONGFORGE_ALLOWED_ROOTS`), `workdir_lock`, `cache`, `env`, `system_append`,
-`effort` (`low|medium|high|off`), `context` (opaque, echoed back), `callback`,
+`effort` (`low|medium|high|xhigh|max|off`), `context` (opaque, echoed back), `callback`,
 `gateway`, `mcp`, `builtin_tools`
 (allowlist of the built-in tools for this task, e.g. read-only ones so writes and
 shell go through the orchestrator's gateway; omit = all; `/v1/info` lists
@@ -492,3 +524,10 @@ usage, maintenance), `unit-net` (network-facing helpers), `unit-final` and `cli`
 - No sandbox, no per-command approval; tool calls within a step run sequentially.
 - `src/app.ts` and `src/maintenance.ts` mention `npm run maintain`; that script is
   not defined in `package.json` (use `POST /v1/maintenance/run` or run the server).
+
+## License
+
+MIT — see [LICENSE](LICENSE). © WrongStack. The license's
+"THE SOFTWARE IS PROVIDED AS IS…" clause is the whole deal: this project is
+**experimental**, maintained on a best-effort basis, and carries no support
+obligations or liability of any kind.

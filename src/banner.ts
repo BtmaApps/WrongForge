@@ -117,6 +117,7 @@ export function renderBanner(i: BannerInfo, color = false): string {
     lines.push(red(`⚠ Listening on ${i.host}, not loopback: put TLS and a firewall in front of it.`));
   }
   lines.push(yellow(`⚠ Whoever has the key can run commands as ${user} on this machine. Keep it secret.`));
+  lines.push(dim("Experimental software, provided as-is — no warranty, no liability (MIT)."));
   lines.push("");
   lines.push(dim("Ctrl+C to stop (running tasks are marked interrupted and can be re-sent)."));
   return lines.join("\n");
