@@ -439,8 +439,13 @@ export class ClaudeOAuth {
     let imported: StoredToken;
     try {
       imported = this.importFromClaudeCode();
-    } catch {
-      return null; // no Claude Code session on this machine (yet) — nothing to adopt
+    } catch (e) {
+      // Not fatal — there may simply be no Claude Code on this machine. But
+      // silence here is what made self-healing undebuggable: a CORRUPT
+      // credentials file looked identical to "Claude Code absent", and the
+      // operator got no clue why recovery never engaged.
+      console.warn(`[auth] nothing to adopt from Claude Code (${(e as Error).message})`);
+      return null;
     }
     if (imported.expiresAt - 60_000 > Date.now()) {
       console.warn("[auth] refresh token rejected — adopted Claude Code's session automatically");
@@ -538,17 +543,28 @@ export class ClaudeOAuth {
       filePath ??
       process.env.CLAUDE_CREDENTIALS_FILE ??
       path.join(os.homedir(), ".claude", ".credentials.json");
-    let raw: any;
+    let text: string;
     try {
-      raw = JSON.parse(fs.readFileSync(file, "utf8"));
+      text = fs.readFileSync(file, "utf8");
     } catch (e) {
       throw new Error(
         `cannot read ${file} — is Claude Code installed and logged in? (${(e as Error).message})`,
       );
     }
+    let raw: any;
+    try {
+      // A UTF-8 BOM is invisible in an editor and is written by plenty of
+      // Windows tooling, but it makes JSON.parse fail on the very first byte.
+      raw = JSON.parse(text.replace(/^\uFEFF/, ""));
+    } catch (e) {
+      // Distinct from a read failure: the file WAS read, its contents are bad.
+      throw new Error(
+        `${file} is not valid JSON (${(e as Error).message}) — Claude Code may have been interrupted while writing it`,
+      );
+    }
     const o = raw?.claudeAiOauth;
     if (!o?.accessToken) {
-      throw new Error("no claudeAiOauth.accessToken in the credentials file");
+      throw new Error(`no claudeAiOauth.accessToken in ${file} — sign in with Claude Code, then retry`);
     }
     const t: StoredToken = {
       accessToken: o.accessToken,

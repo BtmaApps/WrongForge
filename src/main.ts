@@ -334,7 +334,18 @@ main()
     // noise from open TTY handles on Windows
     if (process.argv[2] && process.argv[2] !== "chat") process.exitCode = 0;
   })
-  .catch((e) => {
-    console.error(e);
+  .catch((e: unknown) => {
+    // Most failures here are deliberate and actionable — "Claude Code is not
+    // installed", "OAuth client not configured", "port in use". Printing a
+    // 7-line internal stack for those buries the one line the user needs.
+    // Show the message, and keep the stack behind WRONGFORGE_DEBUG=1 for
+    // anything that turns out to be a genuine bug.
+    const debug = process.env.WRONGFORGE_DEBUG === "1" || process.env.WRONGFORGE_DEBUG === "true";
+    if (e instanceof Error) {
+      if (debug) console.error(e);
+      else console.error(`Error: ${e.message}`);
+    } else {
+      console.error("Error:", e);
+    }
     process.exitCode = 1;
   });

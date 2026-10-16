@@ -54,6 +54,10 @@ export type DeliveryResult = { ok: true; attempts: number } | { ok: false; attem
 
 export class WebhookDispatcher {
   private chains = new Map<string, Promise<unknown>>();
+  /** Set by `close()`: no new deliveries, pending retries abandoned (F934). */
+  private closed = false;
+  /** Backoff sleeps waiting to end, so `close()` can wake them at once. */
+  private readonly sleepers = new Set<() => void>();
   private readonly o: Required<Omit<WebhookOptions, "logger" | "fetchImpl">> & Pick<WebhookOptions, "logger" | "fetchImpl">;
 
   constructor(opts: WebhookOptions) {
@@ -71,6 +75,14 @@ export class WebhookDispatcher {
 
   /** Queues `ev` for delivery (respecting the callback's event filter). */
   enqueue(spec: CallbackSpec, ev: TaskEvent, onDone?: (r: DeliveryResult) => void): void {
+    if (this.closed) {
+      this.o.logger?.warn("webhook.cancelled", {
+        task_id: ev.task_id, seq: ev.seq, type: ev.type, url: spec.url, attempts: 0,
+        error: "dispatcher closed",
+      });
+      onDone?.({ ok: false, attempts: 0, error: "dispatcher closed" });
+      return;
+    }
     if (!eventMatches(spec.events, ev.type)) return;
     const prev = this.chains.get(ev.task_id) ?? Promise.resolve();
     const next = prev
@@ -88,6 +100,44 @@ export class WebhookDispatcher {
     while (this.chains.size) await Promise.all([...this.chains.values()]);
   }
 
+  /**
+   * Stops the dispatcher for good. Retry backoff can otherwise outlive the
+   * manager: `shutdown()` waits for `idle()` only under a grace deadline, so
+   * without this a receiver that keeps returning 500 would go on being called
+   * long after the process reported itself stopped.
+   *
+   * The "stop" is synchronous — the flag is set and every pending backoff is
+   * woken before the first await — so the caller gets a real barrier even if it
+   * gives up waiting for the returned promise. Events not delivered are still
+   * readable through the events API.
+   */
+  async close(): Promise<void> {
+    this.closed = true;
+    for (const wake of [...this.sleepers]) wake();
+    await this.idle();
+  }
+
+  /** A backoff sleep that ends immediately if the dispatcher is closed. */
+  private sleep(ms: number): Promise<void> {
+    return new Promise<void>((resolve) => {
+      const done = (): void => {
+        clearTimeout(timer);
+        this.sleepers.delete(done);
+        resolve();
+      };
+      const timer = setTimeout(done, ms);
+      this.sleepers.add(done);
+    });
+  }
+
+  private cancelled(ev: TaskEvent, attempts: number, url: string): DeliveryResult {
+    this.o.logger?.warn("webhook.cancelled", {
+      task_id: ev.task_id, seq: ev.seq, type: ev.type, url, attempts,
+      error: "dispatcher closed before delivery",
+    });
+    return { ok: false, attempts, error: "dispatcher closed before delivery" };
+  }
+
   private async deliver(url: string, ev: TaskEvent): Promise<DeliveryResult> {
     const body = JSON.stringify({ ...ev, data: sanitize(ev.data, this.o.maxFieldChars) });
     const delivery = crypto.randomUUID();
@@ -95,6 +145,7 @@ export class WebhookDispatcher {
     let lastError = "";
 
     for (let attempt = 1; attempt <= this.o.maxAttempts; attempt++) {
+      if (this.closed) return this.cancelled(ev, attempt - 1, url);
       const timestamp = String(Math.floor(Date.now() / 1000));
       let retryable = true;
       try {
@@ -139,7 +190,8 @@ export class WebhookDispatcher {
       this.o.logger?.warn("webhook.retry", {
         task_id: ev.task_id, seq: ev.seq, type: ev.type, url, attempt, error: lastError, retry_in_ms: delay,
       });
-      await new Promise((r) => setTimeout(r, delay));
+      await this.sleep(delay);
+      if (this.closed) return this.cancelled(ev, attempt, url);
     }
     return { ok: false, attempts: this.o.maxAttempts, error: lastError };
   }

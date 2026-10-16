@@ -503,6 +503,10 @@ export class TaskManager {
     }
     await deadline(Promise.all(pending), graceMs);
     await deadline(this.o.webhook?.idle() ?? Promise.resolve(), graceMs);
+    // Flush-only was not enough: a retrying webhook kept calling out long after
+    // we reported "stopped", because nothing cancelled its backoff (F934).
+    // close() signals synchronously, so the bound below is a wait, not a gate.
+    await deadline(this.o.webhook?.close() ?? Promise.resolve(), graceMs);
     this.flushSaves();
   }
 
