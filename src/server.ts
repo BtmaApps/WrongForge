@@ -463,7 +463,7 @@ export function createAgentServer(opts: ServerOptions): http.Server {
       },
       context: { window: ctx.window, compact_at: ctx.compactAt, clear_at: ctx.clearAt, keep_turns: ctx.keepTurns },
       cache: { default: process.env.WRONGFORGE_CACHE || "1h", modes: ["5m", "1h", "off"] },
-      effort: { default: process.env.WRONGFORGE_EFFORT || "high", levels: ["low", "medium", "high", "off"] },
+      effort: { default: process.env.WRONGFORGE_EFFORT || "high", levels: ["low", "medium", "high", "xhigh", "max", "off"] },
       limits: { max_body_bytes: MAX_BODY, max_steps: 500, default_max_steps: 50 },
       webhook: { signature: "HMAC-SHA256 over '<timestamp>.<body>', header X-WrongForge-Signature: sha256=<hex>", key: process.env.WRONGFORGE_WEBHOOK_SECRET ? "WRONGFORGE_WEBHOOK_SECRET" : "the API key" },
       tools: Object.keys(agentTools),

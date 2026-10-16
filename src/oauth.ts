@@ -236,6 +236,8 @@ export class ClaudeOAuth {
   private readonly store: TokenStore;
   private token: StoredToken | null;
   private inflightRefresh: Promise<StoredToken | null> | null = null;
+  /** Set when Claude Code recovery itself failed — stop retrying this process. */
+  private recoveryExhausted = false;
 
   constructor(storePath?: string) {
     this.store = new TokenStore(
@@ -387,7 +389,10 @@ export class ClaudeOAuth {
           console.error(
             `[auth] refresh HTTP ${res.status}: ${JSON.stringify(res.json)}`,
           );
-          return null;
+          // our refresh token is dead — Claude Code's own session may still
+          // be alive (it refreshes independently); adopt it instead of
+          // failing every task until someone runs `npm run import`
+          return await this.recoverFromClaudeCode();
         }
         this.token = this.applyTokenResponse(res.json, current.scope);
         console.log("[auth] token refreshed");
@@ -400,6 +405,49 @@ export class ClaudeOAuth {
       }
     })();
     return this.inflightRefresh;
+  }
+
+  /**
+   * Self-healing for a rejected refresh token: adopt Claude Code's session
+   * from ~/.claude/.credentials.json (what `npm run import` does manually)
+   * and, when its access token is already expired, refresh that once through
+   * the same endpoint. Returns null when there is nothing to recover from;
+   * a recovery that itself fails is remembered so we do not hammer the token
+   * endpoint on every request. Disable with WRONGFORGE_CC_RECOVERY=0.
+   */
+  private async recoverFromClaudeCode(): Promise<StoredToken | null> {
+    if (this.recoveryExhausted || process.env.WRONGFORGE_CC_RECOVERY === "0") return null;
+    let imported: StoredToken;
+    try {
+      imported = this.importFromClaudeCode();
+    } catch {
+      return null; // no Claude Code session on this machine (yet) — nothing to adopt
+    }
+    if (imported.expiresAt - 60_000 > Date.now()) {
+      console.warn("[auth] refresh token rejected — adopted Claude Code's session automatically");
+      return imported;
+    }
+    try {
+      const res = await tokenPost(this.requireConfig().tokenUrl, {
+        grant_type: "refresh_token",
+        client_id: this.requireConfig().clientId,
+        refresh_token: imported.refreshToken,
+      });
+      if (res.status === 200 && res.json?.access_token) {
+        console.warn("[auth] refresh token rejected — adopted Claude Code's session and refreshed it");
+        this.token = this.applyTokenResponse(res.json, imported.scope);
+        return this.token;
+      }
+      this.recoveryExhausted = true;
+      console.error(
+        `[auth] Claude Code's session cannot refresh either (HTTP ${res.status}) — run Claude Code once, then \`npm run import\` (or \`npm run login\`)`,
+      );
+      return null;
+    } catch (e) {
+      this.recoveryExhausted = true;
+      console.error(`[auth] recovery refresh network error: ${(e as Error).message}`);
+      return null;
+    }
   }
 
   /** Applies a token response, deriving expires_at from expires_in. */
@@ -419,7 +467,11 @@ export class ClaudeOAuth {
     if (!this.token) throw new Error("not signed in — run `npm run login` first");
     if (this.token.expiresAt - 60_000 <= Date.now()) {
       const fresh = await this.refresh();
-      if (!fresh) throw new Error("token refresh failed — sign in again");
+      if (!fresh) {
+        throw new Error(
+          "token refresh failed — run Claude Code once, then `npm run import` (or `npm run login`)",
+        );
+      }
       return fresh.accessToken;
     }
     return this.token.accessToken;
@@ -438,7 +490,9 @@ export class ClaudeOAuth {
 
   importFromClaudeCode(filePath?: string): StoredToken {
     const file =
-      filePath ?? path.join(os.homedir(), ".claude", ".credentials.json");
+      filePath ??
+      process.env.CLAUDE_CREDENTIALS_FILE ??
+      path.join(os.homedir(), ".claude", ".credentials.json");
     let raw: any;
     try {
       raw = JSON.parse(fs.readFileSync(file, "utf8"));

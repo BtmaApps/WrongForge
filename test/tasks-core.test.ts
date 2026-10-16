@@ -207,13 +207,13 @@ async function main(): Promise<void> {
   assert(fake.turns().at(-1)!.body.model === "claude-sonnet-5-5", "default model otherwise");
 
   // ============================================================ effort passthrough
-  assert(fake.turns().at(-1)!.body.effort === "high", "default effort is sent (high)");
+  assert(fake.turns().at(-1)!.body.output_config?.effort === "high", "default effort is sent (high)");
   await h2.api("POST", "/v1/tasks", { workdir: dirA, prompt: "[[say e]]", effort: "low", wait: true });
-  assert(fake.turns().at(-1)!.body.effort === "low", 'effort:"low" reaches the request body');
+  assert(fake.turns().at(-1)!.body.output_config?.effort === "low", 'effort:"low" reaches the request body');
   const effOff = (await h2.api("POST", "/v1/tasks", { workdir: dirA, prompt: "[[say e]]", effort: "off", wait: true })).body.task;
-  assert(!("effort" in fake.turns().at(-1)!.body) && effOff.effort === "off", 'effort:"off" omits the field');
-  const effOld = (await h2.api("POST", "/v1/tasks", { workdir: dirA, prompt: "[[say e]]", model: "claude-opus-4-1-20250805", wait: true })).body.task;
-  assert(!("effort" in fake.turns().at(-1)!.body) && effOld.effort === "high", "a pre-effort model never receives the field (setting kept)");
+  assert(fake.turns().at(-1)!.body.output_config?.effort === undefined && effOff.effort === "off", 'effort:"off" omits the field');
+  const effOld = (await h2.api("POST", "/v1/tasks", { workdir: dirA, prompt: "[[say e]]", model: "claude-3-opus-20240229", wait: true })).body.task;
+  assert(fake.turns().at(-1)!.body.output_config?.effort === undefined && effOld.effort === "high", "a pre-effort model never receives the field (setting kept)");
 
   // ============================================================ report_progress + todos
   const rp = (await h2.api("POST", "/v1/tasks", {

@@ -1,17 +1,20 @@
 /**
  * Reasoning effort for /v1/messages requests (the `effort` field).
  *
- * Effort-capable Claude models accept `effort: "low" | "medium" | "high"`,
- * trading answer depth for output tokens. Which levels a model understands
- * depends on its family: `effortSupport()` maps model ids to the levels they
- * accept and `resolveEffort()` clamps a requested setting to the nearest
- * supported one, so one setting works across the whole lineup (asking "high"
- * on a model that tops out at "medium" sends "medium", not an API error).
+ * Effort-capable Claude models accept `effort: "low" | "medium" | "high" |
+ * "xhigh" | "max"`, trading answer depth for output tokens. The field rides
+ * behind the `effort-2025-11-24` beta header (provider.ts sends it on every
+ * request, exactly like Claude Code 2.1.300 does) — without that beta the
+ * endpoint rejects the body with "effort: Extra inputs are not permitted".
+ * `effortSupport()` maps model ids to the levels they accept and
+ * `resolveEffort()` clamps a requested setting to the nearest supported one,
+ * so one setting works across the whole lineup (asking "high" on a model that
+ * tops out at "medium" sends "medium", not an API error).
  *
  * Setting (per task via the `effort` submit field, REPL via /effort, default
  * from WRONGFORGE_EFFORT):
- *   "low" | "medium" | "high"   send that effort, clamped to model support
- *   "off"                       never send the field (pre-effort behavior)
+ *   "low" … "max"               send that effort, clamped to model support
+ *   "off"                       never send the field
  *
  * Unknown/future model ids (e.g. live /v1/models entries newer than the
  * table below) are assumed effort-capable; if the API then rejects the
@@ -19,16 +22,18 @@
  * THAT model — the same self-healing cache_control already uses.
  */
 
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { currentContext } from "./context.js";
 
-export type Effort = "low" | "medium" | "high";
+export type Effort = "low" | "medium" | "high" | "xhigh" | "max";
 
-export const EFFORTS: readonly Effort[] = ["low", "medium", "high"];
+export const EFFORTS: readonly Effort[] = ["low", "medium", "high", "xhigh", "max"];
 
 /** A configured effort: a level, or "off" to omit the field entirely. */
 export type EffortSetting = Effort | "off";
 
-export const EFFORT_SETTINGS: readonly EffortSetting[] = ["low", "medium", "high", "off"];
+export const EFFORT_SETTINGS: readonly EffortSetting[] = ["low", "medium", "high", "xhigh", "max", "off"];
 
 export function isEffort(v: unknown): v is Effort {
   return typeof v === "string" && (EFFORTS as readonly string[]).includes(v);
@@ -50,18 +55,19 @@ const ALL = EFFORTS;
 const NONE: readonly Effort[] = [];
 
 /**
- * Model families → accepted effort levels. Rules run most-specific first:
- * the 4-5 rule must be tested before the bare "4" rule because
- * "claude-sonnet-4-5" also matches /^claude-sonnet-4/. Ids that match no rule
- * (anything newer than this table) fall through to ALL.
+ * Which model families accept `effort`. Mirrors the capability table carved
+ * from Claude Code 2.1.300 (re/artifacts/ccmods/mod-0034.mjs, `Vme` → the
+ * family set `Ib` that gates the field in mod-0150 `Db`/mod-0422 `Wze`):
+ * everything from the 3.5 generation through the 5.x lineup — sonnet, opus,
+ * haiku, fable and mythos — is effort-capable, including claude-sonnet-5-5
+ * and claude-opus-5-5. Only the pre-3.5 era (claude-3-*, claude-2*) lacks it.
+ * Unknown ids (anything newer than this table) are assumed capable, same
+ * fallback CC's client uses before its served catalog answers.
  */
 const EFFORT_RULES: Array<[RegExp, readonly Effort[]]> = [
-  // 5.x family — the current lineup
-  [/^claude-(haiku|sonnet|opus|fable)-5(-|$)/, ALL],
-  // 4.5 family — the first generation with the effort parameter
-  [/^claude-(haiku|sonnet|opus)-4-5(-|$)/, ALL],
-  // 3.x and the 4.0/4.1 generation — extended-thinking budget era, no effort field
-  [/^claude-(3|haiku-4|sonnet-4|opus-4)/, NONE],
+  // the pre-3.5 era has no effort field — Vme starts at 3-5/3-7
+  [/^claude-3-(?!5|7)/, NONE],
+  [/^claude-2/, NONE],
 ];
 
 /** Which effort levels a model id accepts (empty = the model has none). */
@@ -74,7 +80,7 @@ export function effortSupport(model: string): readonly Effort[] {
 
 // ---------------------------------------------------------------- resolution
 
-const RANK: Record<Effort, number> = { low: 0, medium: 1, high: 2 };
+const RANK: Record<Effort, number> = { low: 0, medium: 1, high: 2, xhigh: 3, max: 4 };
 
 /** Nearest supported level to `setting` (ties prefer the lower one). */
 export function clampEffort(setting: Effort, supported: readonly Effort[]): Effort {
@@ -110,14 +116,19 @@ export function resolveEffort(setting: EffortSetting, model: string): ResolvedEf
 }
 
 /**
- * Sets `effort` on a parsed /v1/messages body according to the setting and
- * the body's own `model` — a no-op when the field must not be sent. The
- * provider-layer counterpart of applyCacheBreakpoints in cache.ts.
+ * Sets `output_config.effort` on a parsed /v1/messages body according to the
+ * setting and the body's own `model` — a no-op when the field must not be
+ * sent. Wire shape verified against captured CC 2.1.300 traffic
+ * (re/notes/cc-capture.jsonl): effort rides INSIDE `output_config`, never as
+ * a top-level field (a top-level `effort` is rejected with "Extra inputs are
+ * not permitted"), and the effort-2025-11-24 beta header travels alongside
+ * (provider.ts). The provider-layer counterpart of applyCacheBreakpoints.
  * Returns the value that was set, or null when the field stays absent.
  */
 export function applyEffortToBody(body: any, setting: EffortSetting): Effort | null {
   const resolved = resolveEffort(setting, String(body?.model ?? ""));
-  if (resolved.effort) body.effort = resolved.effort;
+  if (!resolved.effort) return null;
+  body.output_config = { ...(body.output_config ?? {}), effort: resolved.effort };
   return resolved.effort;
 }
 
@@ -140,15 +151,65 @@ export function sessionEffort(): EffortSetting | null {
 let effortRejectedAll = false;
 const rejectedModels = new Set<string>();
 
+// ------------------------------------------------------- learned rejections
+// What the API refuses is remembered on disk too, so a serve restart does not
+// re-pay the probe (one failed request + retry) for every already-known model.
+// Entries expire: a backend that gains effort support is picked up again.
+
+/** How long a learned rejection is trusted (default: a week). */
+const REJECTION_TTL_MS = 7 * 24 * 3600 * 1000;
+const GLOBAL_KEY = "*";
+
+let rejectionFile: string | null = null;
+
+/**
+ * Wires the learned-rejection cache to a file and loads it (createApp does
+ * this with <home>/effort-rejections.json). Without a call, the cache stays
+ * process-local — that is what library users and the unit tests get, so
+ * nothing ever writes to a real data directory from a test process.
+ */
+export function initEffortPersistence(file?: string): void {
+  rejectionFile = file ?? null;
+  effortRejectedAll = false;
+  rejectedModels.clear();
+  if (!rejectionFile) return;
+  try {
+    const doc = JSON.parse(fs.readFileSync(rejectionFile, "utf8")) as { rejected?: Record<string, unknown> };
+    const now = Date.now();
+    for (const [model, ts] of Object.entries(doc.rejected ?? {})) {
+      if (typeof ts !== "number" || now - ts > REJECTION_TTL_MS) continue;
+      if (model === GLOBAL_KEY) effortRejectedAll = true;
+      else rejectedModels.add(model);
+    }
+  } catch {
+    /* absent or unreadable — start empty */
+  }
+}
+
+function persistRejections(): void {
+  if (!rejectionFile) return;
+  const rejected: Record<string, number> = {};
+  for (const m of rejectedModels) rejected[m] = Date.now();
+  if (effortRejectedAll) rejected[GLOBAL_KEY] = Date.now();
+  try {
+    fs.mkdirSync(path.dirname(rejectionFile), { recursive: true });
+    fs.writeFileSync(rejectionFile, `${JSON.stringify({ version: 1, rejected }, null, 2)}\n`);
+  } catch {
+    /* read-only data dir — stay memory-only */
+  }
+}
+
 /**
  * Set by provider.ts when the API refused the `effort` field. With a model id
  * only THAT model loses effort (others keep theirs — a capable model must not
  * be punished for an incapable one); without one (unparseable body) the whole
- * process opts out. Learned per process, never persisted.
+ * process opts out. Remembered across restarts (7 days) when
+ * initEffortPersistence has wired a file.
  */
 export function markEffortRejected(model?: string): void {
   if (model) rejectedModels.add(model);
   else effortRejectedAll = true;
+  persistRejections();
 }
 
 export function effortRejectedOnce(model?: string): boolean {

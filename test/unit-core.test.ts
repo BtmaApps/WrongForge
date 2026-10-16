@@ -28,6 +28,7 @@ import {
   effectiveEffort,
   effortRejectedOnce,
   effortSupport,
+  initEffortPersistence,
   isEffortSetting,
   markEffortRejected,
   resetEffortRejections,
@@ -345,21 +346,29 @@ async function main(): Promise<void> {
     assert(defaultEffort({ WRONGFORGE_EFFORT: "turbo" }) === "high", "invalid env effort falls back to high");
     assert(isEffortSetting("off") && isEffortSetting("medium") && !isEffortSetting("turbo") && !isEffortSetting(3), "effort setting validation");
 
-    assert(effortSupport("claude-sonnet-5-5").length === 3, "5.x family supports every level");
+    // the capability table mirrors CC 2.1.300's Vme list (re/carved): every
+    // family from 3-5/3-7 through the 5.x lineup is effort-capable
+    assert(effortSupport("claude-sonnet-5-5").length === 5, "5.x family supports every level incl. xhigh/max");
+    assert(effortSupport("claude-opus-5-5").includes("max"), "opus 5.5 is effort-capable (Vme)");
     assert(effortSupport("claude-fable-5-1").includes("high"), "fable 5.x supports high");
-    assert(effortSupport("claude-haiku-4-5-20251001").length === 3, "4.5 family supports every level");
-    assert(effortSupport("claude-sonnet-4-20250514").length === 0, "sonnet 4.0 has no effort");
-    assert(effortSupport("claude-opus-4-1-20250805").length === 0, "opus 4.1 has no effort");
-    assert(effortSupport("claude-3-5-sonnet-20241022").length === 0, "3.x has no effort");
-    assert(effortSupport("claude-future-9").length === 3, "unknown models are assumed effort-capable");
+    assert(effortSupport("claude-haiku-4-5-20251001").length === 5, "4.5 family supports every level");
+    assert(effortSupport("claude-sonnet-4-20250514").length === 5, "sonnet 4.0 is effort-capable (in Vme)");
+    assert(effortSupport("claude-opus-4-1-20250805").length === 5, "opus 4.1 is effort-capable (in Vme)");
+    assert(effortSupport("claude-3-5-sonnet-20241022").length === 5, "3.5/3.7 are effort-capable (in Vme)");
+    assert(effortSupport("claude-3-opus-20240229").length === 0, "the pre-3.5 3.x era has no effort");
+    assert(effortSupport("claude-3-sonnet-20240229").length === 0, "bare 3.0 sonnet has no effort");
+    assert(effortSupport("claude-2-1").length === 0, "2.x has no effort");
+    assert(effortSupport("claude-future-9").length === 5, "unknown models are assumed effort-capable");
 
     assert(resolveEffort("high", "claude-sonnet-5-5").effort === "high", "supported level passes through");
+    assert(resolveEffort("xhigh", "claude-sonnet-5-5").effort === "xhigh", "xhigh passes through on capable models");
     assert(resolveEffort("off", "claude-sonnet-5-5").effort === null, "off omits the field");
-    const none = resolveEffort("high", "claude-opus-4-1");
+    const none = resolveEffort("high", "claude-3-opus");
     assert(none.effort === null && none.unsupported, "effort-incapable model omits the field");
     assert(clampEffort("high", ["low", "medium"]) === "medium", "clamp picks the nearest level below");
     assert(clampEffort("low", ["medium", "high"]) === "medium", "clamp picks the nearest level above");
     assert(clampEffort("medium", ["low", "high"]) === "low", "clamp tie prefers the cheaper level");
+    assert(clampEffort("max", ["low", "medium", "high", "xhigh"]) === "xhigh", "clamp caps max at xhigh");
 
     setSessionEffort("low");
     assert(sessionEffort() === "low", "session effort set");
@@ -377,16 +386,45 @@ async function main(): Promise<void> {
     resetEffortRejections();
     assert(!effortRejectedOnce("claude-sonnet-5-5") && effectiveEffort("claude-sonnet-5-5") === "high", "reset forgets the learned rejections");
 
-    // the provider injects effort into the /v1/messages body, model-aware
+    // persistence: rejections learned with a wired file survive a "restart"
+    // (reload), stay per-model, and expire — so serve restarts stop re-paying
+    // the probe for models the API already refused
+    {
+      const fs = await import("node:fs");
+      const os = await import("node:os");
+      const path = await import("node:path");
+      const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "wf-effort-")), "effort-rejections.json");
+      initEffortPersistence(file);
+      markEffortRejected("claude-opus-5-5");
+      assert(fs.existsSync(file), "a learned rejection is written to disk");
+      resetEffortRejections();
+      assert(!effortRejectedOnce("claude-opus-5-5"), "reset clears memory");
+      initEffortPersistence(file); // what a serve restart does
+      assert(effortRejectedOnce("claude-opus-5-5") && effectiveEffort("claude-opus-5-5") === "off", "a restart remembers the learned rejection");
+      assert(effectiveEffort("claude-sonnet-5-5") === "high", "the memory stays per model");
+      // an expired entry is dropped on load
+      fs.writeFileSync(file, JSON.stringify({ version: 1, rejected: { "claude-opus-5-5": Date.now() - 8 * 24 * 3600 * 1000 } }));
+      initEffortPersistence(file);
+      assert(!effortRejectedOnce("claude-opus-5-5"), "rejections expire after a week");
+      resetEffortRejections();
+    }
+
+    // the provider injects effort into the /v1/messages body, model-aware —
+    // inside output_config (the wire shape CC 2.1.300 uses), never top-level
     const mkBody = (model: string): Record<string, unknown> => ({ model, max_tokens: 32, messages: [] });
     const withEffort = mkBody("claude-sonnet-5-5");
-    assert(applyEffortToBody(withEffort, "high") === "high" && withEffort.effort === "high", "body carries the effort field");
+    assert(applyEffortToBody(withEffort, "high") === "high" && withEffort.output_config?.effort === "high", "body carries output_config.effort");
+    assert(!("effort" in withEffort), "effort never rides as a top-level field");
+    const merged = mkBody("claude-sonnet-5-5");
+    merged.output_config = { format: { type: "json_schema" } };
+    applyEffortToBody(merged, "xhigh");
+    assert(merged.output_config.effort === "xhigh" && merged.output_config.format, "existing output_config keys survive the merge");
     const offBody = mkBody("claude-sonnet-5-5");
-    assert(applyEffortToBody(offBody, "off") === null && !("effort" in offBody), "off leaves the body untouched");
-    const oldBody = mkBody("claude-3-5-sonnet-20241022");
-    assert(applyEffortToBody(oldBody, "high") === null && !("effort" in oldBody), "old models get no effort field");
+    assert(applyEffortToBody(offBody, "off") === null && !offBody.output_config, "off leaves the body untouched");
+    const oldBody = mkBody("claude-3-opus-20240229");
+    assert(applyEffortToBody(oldBody, "high") === null && !oldBody.output_config, "old models get no effort field");
     const midBody = mkBody("claude-haiku-5-5");
-    assert(applyEffortToBody(midBody, "medium") === "medium" && midBody.effort === "medium", "effort level forwarded verbatim");
+    assert(applyEffortToBody(midBody, "medium") === "medium" && midBody.output_config.effort === "medium", "effort level forwarded verbatim");
   }
 
   // ================================================== tool schema flattening

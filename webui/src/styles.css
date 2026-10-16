@@ -280,6 +280,13 @@ body {
   flex-direction: column;
 }
 
+/* Radix hides inactive tab panels via the `hidden` attribute — our display
+ * rule above would override it and stack every panel on screen at once. */
+.tabs-content[hidden],
+.tabs-content[data-state="inactive"] {
+  display: none;
+}
+
 /* ------------------------------------------------------- overview control room
  * One screen, three panes: tasks | live feed | inspector. Each pane scrolls
  * on its own; the screen itself never scrolls. */

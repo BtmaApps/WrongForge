@@ -485,7 +485,7 @@ data: ${JSON.stringify(o)}
     req.on("end", () => {
       const body = JSON.parse(Buffer.concat(chunks).toString());
       effortBodies.push(body);
-      if (body.model === "m-noeffort" && "effort" in body) {
+      if (body.model === "m-noeffort" && body.output_config?.effort !== undefined) {
         res.writeHead(400, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "effort: Extra inputs are not permitted" } }));
         return;
@@ -508,9 +508,9 @@ data: ${JSON.stringify(o)}
   eOauth.importFromClaudeCode(ccFile);
   const e1 = await runAgentTurn(createClaudeClient(eOauth), "m-noeffort", [{ role: "user", content: "x" }], 2);
   assert(e1.text === "effok" && effortBodies.length === 2, "effort rejected -> retried once without it");
-  assert(effortBodies[0].effort === "high" && !("effort" in effortBodies[1]), "first body carries effort, the retry drops it");
+  assert(effortBodies[0].output_config?.effort === "high" && effortBodies[1].output_config?.effort === undefined, "first body carries output_config.effort, the retry drops it");
   const e2 = await runAgentTurn(createClaudeClient(eOauth), "m-capable", [{ role: "user", content: "x" }], 2);
-  assert(e2.text === "effok" && effortBodies[2].effort === "high", "a different model keeps its effort after the rejection");
+  assert(e2.text === "effok" && effortBodies[2].output_config?.effort === "high", "a different model keeps its effort after the rejection");
   effortServer.close();
 
   // cleanup servers

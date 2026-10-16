@@ -33,6 +33,7 @@ import { TaskManager, type ManagerOptions } from "./tasks/manager.js";
 import { WebhookDispatcher, type WebhookOptions } from "./tasks/webhook.js";
 import { retentionFromEnv, type Retention } from "./maintenance.js";
 import { defaultMcpRegistry, type McpRegistry } from "./mcp/registry.js";
+import { initEffortPersistence } from "./effort.js";
 import type { ContextConfig } from "./compaction.js";
 
 export interface AppOptions {
@@ -88,6 +89,8 @@ export function createApp(o: AppOptions): App {
     tasks: path.join(home, "tasks"),
     sessions: path.join(home, "sessions"),
   };
+  // remember across restarts which models the API refuses `effort` for
+  initEffortPersistence(path.join(home, "effort-rejections.json"));
 
   const level = (["debug", "info", "warn", "error"] as const).includes(env.WRONGFORGE_LOG_LEVEL as LogLevel)
     ? (env.WRONGFORGE_LOG_LEVEL as LogLevel)

@@ -227,8 +227,74 @@ function main(): Promise<void> {
         if (viaImport !== "imported-at") throw new Error("imported token not usable");
         check(oauth2.signedIn, "import marks the session as signed in");
 
+        // 5) self-healing: a rejected refresh token adopts Claude Code's session
+        {
+          let ccRefreshes = 0;
+          let tokenCalls = 0;
+          const dead = http.createServer((req, res) => {
+            const chunks: Buffer[] = [];
+            req.on("data", (c: Buffer) => chunks.push(c));
+            req.on("end", () => {
+              tokenCalls++;
+              const b = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+              if (b.grant_type === "refresh_token" && b.refresh_token === "dead-rt") {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ error: "invalid_grant", error_description: "refresh token expired" }));
+                return;
+              }
+              ccRefreshes++;
+              res.writeHead(200, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ access_token: "recovered-at", refresh_token: "cc-rt-2", expires_in: 3600, scope: "user:inference" }));
+            });
+          });
+          await new Promise<void>((r) => dead.listen(0, "127.0.0.1", r));
+          const prevTokenUrl = process.env.ANTHROPIC_TOKEN_URL;
+          const prevCred = process.env.CLAUDE_CREDENTIALS_FILE;
+          try {
+            process.env.ANTHROPIC_TOKEN_URL = `http://127.0.0.1:${(dead.address() as any).port}/v1/oauth/token`;
+            const home = mkTmp("wf-recovery-");
+            const seedDead = path.join(home, "dead-session.json");
+            fs.writeFileSync(seedDead, JSON.stringify({ claudeAiOauth: { accessToken: "old-at", refreshToken: "dead-rt", expiresAt: Date.now() - 1000, scopes: ["user:inference"] } }));
+            const ccAlive = path.join(home, "cc-alive.json");
+            // Claude Code's session: its access token is expired too, but its
+            // refresh token still works — exactly the "run CC once" state
+            fs.writeFileSync(ccAlive, JSON.stringify({ claudeAiOauth: { accessToken: "cc-stale-at", refreshToken: "cc-rt", expiresAt: Date.now() - 1000, scopes: ["user:inference"] } }));
+
+            const oauth3 = new ClaudeOAuth(path.join(home, "tokens3.json"));
+            oauth3.importFromClaudeCode(seedDead); // a dead session, manually seeded
+            process.env.CLAUDE_CREDENTIALS_FILE = ccAlive;
+            const got = await oauth3.getAccessToken();
+            check(got === "recovered-at", "a rejected refresh adopts Claude Code's session and refreshes it");
+            check(ccRefreshes === 1, "recovery used exactly one refresh call");
+            check(oauth3.signedIn, "recovery keeps the session signed in");
+            const again = await oauth3.getAccessToken();
+            check(again === "recovered-at" && ccRefreshes === 1, "the recovered token is used without further refreshes");
+
+            // nothing left to recover from: Claude Code's refresh is dead too
+            const oauth4 = new ClaudeOAuth(path.join(home, "tokens4.json"));
+            oauth4.importFromClaudeCode(seedDead);
+            process.env.CLAUDE_CREDENTIALS_FILE = seedDead; // CC holds the same dead token
+            const before = tokenCalls;
+            let msg = "";
+            try {
+              await oauth4.getAccessToken();
+            } catch (e) {
+              msg = (e as Error).message;
+            }
+            check(/npm run import/.test(msg), `unrecoverable refresh tells the user what to run (${msg})`);
+            check(tokenCalls === before + 2, "doomed refresh + one recovery attempt, then it gives up");
+            await oauth4.getAccessToken().catch(() => {});
+            check(tokenCalls === before + 3, "recovery stays exhausted — later calls only pay the doomed refresh");
+          } finally {
+            process.env.ANTHROPIC_TOKEN_URL = prevTokenUrl;
+            if (prevCred === undefined) delete process.env.CLAUDE_CREDENTIALS_FILE;
+            else process.env.CLAUDE_CREDENTIALS_FILE = prevCred;
+            dead.close();
+          }
+        }
+
         server.close();
-        console.log("ALL TESTS PASSED ✓ (exchange, refresh, header injection, import)");
+        console.log("ALL TESTS PASSED ✓ (exchange, refresh, header injection, import, refresh-token recovery)");
         resolve();
       } catch (e) {
         server.close();

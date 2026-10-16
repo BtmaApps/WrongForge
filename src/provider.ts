@@ -167,6 +167,11 @@ const CLAUDE_CODE_BETAS = [
   "interleaved-thinking-2025-05-14",
   "context-management-2025-06-27",
   "dangerous-tool-use-2026-09-03",
+  // the `effort` request field is gated behind this beta (RE: CC 2.1.300
+  // mod-0422 Wze pushes it whenever effort is sent; without it the endpoint
+  // answers "effort: Extra inputs are not permitted"). CC sends it on every
+  // request, effort or not — matching that is the safest posture.
+  "effort-2025-11-24",
 ];
 
 /**
@@ -321,9 +326,10 @@ export function oauthFetch(oauth: ClaudeOAuth): typeof globalThis.fetch {
           /* keep "" — the global fallback below */
         }
         markEffortRejected(model || undefined);
-        console.error(
-          `[effort] ${model || "this backend"} does not accept the effort parameter — retried without it; effort is now off for ${model || "all models"} in this process:`,
-          detail.slice(0, 300),
+        // informational only — the retry below is what the caller sees, and
+        // the learned rejection is remembered across restarts (effort.ts)
+        console.warn(
+          `[effort] ${model || "this backend"} does not accept the effort parameter — retried without it; effort is off for ${model || "all models"} (remembered 7d)`,
         );
         res = await doFetch();
       }
