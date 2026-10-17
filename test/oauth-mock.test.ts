@@ -9,8 +9,12 @@ import * as http from "node:http";
 import * as path from "node:path";
 import * as fs from "node:fs";
 import * as os from "node:os";
-import { ClaudeOAuth, parsePastedCode } from "../src/oauth.js";
+import { ClaudeOAuth, CLAUDE_CODE_UA, parsePastedCode, setKeychainReaderForTest } from "../src/oauth.js";
 import { oauthFetch } from "../src/provider.js";
+
+// the token endpoint speaks urlencoded (issue #3: the Claude Code signature)
+const formBody = (raw: string): Record<string, string> =>
+  Object.fromEntries(new URLSearchParams(raw));
 
 // Temp dirs live under the OS temp dir and are removed on exit (pass or fail).
 const tmpDirs: string[] = [];
@@ -68,7 +72,7 @@ function main(): Promise<void> {
         if (req.url === "/v1/oauth/token") {
           seen.tokenRequests.push({
             headers: req.headers,
-            body: JSON.parse(body),
+            body: formBody(body),
           });
           tokenCall++;
           // first call: 429 with Retry-After: 0 (exercises the retry path),
@@ -153,12 +157,16 @@ function main(): Promise<void> {
           "exchange body is correct",
         );
         check(
-          String(ex.headers["content-type"]).includes("application/json"),
-          "token endpoint receives a JSON body",
+          String(ex.headers["content-type"]).includes("application/x-www-form-urlencoded"),
+          "token endpoint receives a urlencoded body",
         );
         check(
-          ex.headers["user-agent"] === "anthropic",
-          "token endpoint receives the anthropic User-Agent",
+          ex.headers["user-agent"] === CLAUDE_CODE_UA,
+          "token endpoint receives the Claude Code User-Agent",
+        );
+        check(
+          ex.headers["x-app"] === "cli",
+          "token endpoint receives the Claude Code x-app marker",
         );
         check(
           !("authorization" in ex.headers),
@@ -236,7 +244,7 @@ function main(): Promise<void> {
             req.on("data", (c: Buffer) => chunks.push(c));
             req.on("end", () => {
               tokenCalls++;
-              const b = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+              const b = formBody(Buffer.concat(chunks).toString("utf8"));
               if (b.grant_type === "refresh_token" && b.refresh_token === "dead-rt") {
                 res.writeHead(400, { "Content-Type": "application/json" });
                 res.end(JSON.stringify({ error: "invalid_grant", error_description: "refresh token expired" }));
@@ -305,7 +313,7 @@ function main(): Promise<void> {
             const chunks: Buffer[] = [];
             req.on("data", (c: Buffer) => chunks.push(c));
             req.on("end", () => {
-              const b = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+              const b = formBody(Buffer.concat(chunks).toString("utf8"));
               res.writeHead(200, { "Content-Type": "application/json" });
               if (b.grant_type === "refresh_token") {
                 arrived();
@@ -363,8 +371,56 @@ function main(): Promise<void> {
           }
         }
 
+        // 7) import falls back to the macOS Keychain when the credentials
+        //    file is gone (Claude Code 2.1.302+, issue #3) — reader swapped
+        //    in so non-macOS machines exercise the same path
+        {
+          const kc = JSON.stringify({
+            claudeAiOauth: { accessToken: "kc-at", refreshToken: "kc-rt", expiresAt: Date.now() + 3600_000, scopes: ["user:inference"] },
+          });
+          const home = mkTmp("wf-keychain-");
+          const missing = path.join(home, ".claude", ".credentials.json");
+          try {
+            setKeychainReaderForTest(() => kc);
+            const oauth6 = new ClaudeOAuth(path.join(home, "tokens6.json"));
+            const t = oauth6.importFromClaudeCode(missing);
+            check(t.accessToken === "kc-at" && t.refreshToken === "kc-rt", "keychain JSON (file shape) imported");
+            check((await oauth6.getAccessToken()) === "kc-at", "keychain-imported token is usable");
+
+            const oauth7 = new ClaudeOAuth(path.join(home, "tokens7.json"));
+            setKeychainReaderForTest(() =>
+              JSON.stringify({ accessToken: "bare-at", refreshToken: "bare-rt", expiresAt: Date.now() + 3600_000, scopes: ["user:inference"] }),
+            );
+            check(oauth7.importFromClaudeCode(missing).accessToken === "bare-at", "keychain JSON (bare shape) imported");
+
+            const oauth8 = new ClaudeOAuth(path.join(home, "tokens8.json"));
+            setKeychainReaderForTest(() => `\uFEFF${kc}\n`);
+            check(oauth8.importFromClaudeCode(missing).accessToken === "kc-at", "keychain BOM/newlines tolerated");
+
+            setKeychainReaderForTest(() => null);
+            let msg = "";
+            try {
+              await new ClaudeOAuth(path.join(home, "tokens9.json")).importFromClaudeCode(missing);
+            } catch (e) {
+              msg = (e as Error).message;
+            }
+            check(/cannot read/.test(msg) && msg.includes(missing), `missing file + empty keychain -> the read error (${msg})`);
+
+            setKeychainReaderForTest(() => "not json {");
+            let msg2 = "";
+            try {
+              await new ClaudeOAuth(path.join(home, "tokens10.json")).importFromClaudeCode(missing);
+            } catch (e) {
+              msg2 = (e as Error).message;
+            }
+            check(/not valid JSON/.test(msg2) && /Keychain/.test(msg2), `garbage keychain -> the JSON error names the source (${msg2})`);
+          } finally {
+            setKeychainReaderForTest(null);
+          }
+        }
+
         server.close();
-        console.log("ALL TESTS PASSED ✓ (exchange, refresh, header injection, import, refresh-token recovery, stale-refresh race)");
+        console.log("ALL TESTS PASSED ✓ (exchange, refresh, header injection, import, Keychain fallback, refresh-token recovery, stale-refresh race)");
         resolve();
       } catch (e) {
         server.close();

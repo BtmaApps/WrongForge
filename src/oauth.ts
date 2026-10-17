@@ -24,7 +24,7 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import * as readline from "node:readline/promises";
 import { dataDir } from "./paths.js";
 import {
@@ -38,6 +38,16 @@ export const PROTOCOL = {
   anthropicVersion: "2023-06-01",
   oauthBeta: "oauth-2025-04-20",
 } as const;
+
+/**
+ * The Claude Code CLI user-agent, captured verbatim from real client traffic
+ * (re/notes/cc-capture.jsonl). Shared by the provider's /v1/messages calls and
+ * the OAuth token endpoint below: the subscription backend serves one client
+ * class everywhere — a generic `anthropic` UA on the token endpoint gets
+ * 429-rate-limited while the real client refreshes freely with the same
+ * account, IP and client id (issue #3).
+ */
+export const CLAUDE_CODE_UA = "claude-cli/2.1.300 (external, sdk-cli)";
 
 // ---------------------------------------------------------------------------
 // PKCE
@@ -128,12 +138,14 @@ class TokenStore {
 // ---------------------------------------------------------------------------
 
 /**
- * Token endpoint call — JSON body (not the urlencoded OAuth default):
- *   Content-Type: application/json
- *   User-Agent: anthropic
- * The wire shape below matches the flow the endpoint actually accepts;
- * api.anthropic.com's token endpoint rejects this flow ("Invalid request
- * format") — only console.anthropic.com/v1/oauth/token serves it.
+ * Token endpoint call — a urlencoded OAuth body under the Claude Code client
+ * signature:
+ *   Content-Type: application/x-www-form-urlencoded
+ *   User-Agent: claude-cli/<v> (external, sdk-cli)   +   x-app: cli
+ * A JSON body with a generic `anthropic` UA used to work, but the endpoint
+ * now 429-rate-limits that shape while Claude Code's own requests refresh
+ * freely on the same account, IP and client id (issue #3) — the request
+ * format was the only difference left.
  *
  * The endpoint rate-limits aggressively; on HTTP 429 this waits (honoring
  * Retry-After) and retries a few times before giving up.
@@ -148,11 +160,12 @@ async function tokenPost(
     const res = await fetch(url, {
       method: "POST",
       headers: {
-        "Content-Type": "application/json",
+        "Content-Type": "application/x-www-form-urlencoded",
         Accept: "application/json",
-        "User-Agent": "anthropic",
+        "User-Agent": CLAUDE_CODE_UA,
+        "x-app": "cli",
       },
-      body: JSON.stringify(body),
+      body: new URLSearchParams(body).toString(),
     });
     const text = await res.text();
     let json: any = null;
@@ -350,7 +363,7 @@ export class ClaudeOAuth {
   }
 
   // ------------------------------------------------------------------
-  // authorization_code -> token (POST /v1/oauth/token, JSON body)
+  // authorization_code -> token (POST /v1/oauth/token, urlencoded body)
   // body: grant_type, code, code_verifier, client_id, redirect_uri, state
   // ------------------------------------------------------------------
 
@@ -534,8 +547,9 @@ export class ClaudeOAuth {
 
   // ------------------------------------------------------------------
   // Import — reuse an existing Claude Code CLI session instead of a new
-  // login. Reads claudeAiOauth from ~/.claude/.credentials.json and stores
-  // it in this app's token store; refreshes through the same endpoint.
+  // login. Reads claudeAiOauth from ~/.claude/.credentials.json (or the
+  // macOS Keychain, where Claude Code 2.1.302+ keeps it) and stores it in
+  // this app's token store; refreshes through the same endpoint.
   // ------------------------------------------------------------------
 
   importFromClaudeCode(filePath?: string): StoredToken {
@@ -544,12 +558,25 @@ export class ClaudeOAuth {
       process.env.CLAUDE_CREDENTIALS_FILE ??
       path.join(os.homedir(), ".claude", ".credentials.json");
     let text: string;
+    let source: string;
     try {
       text = fs.readFileSync(file, "utf8");
+      source = file;
     } catch (e) {
-      throw new Error(
-        `cannot read ${file} — is Claude Code installed and logged in? (${(e as Error).message})`,
-      );
+      // Claude Code 2.1.302+ dropped the legacy plain file for the macOS
+      // Keychain — fall back to reading it there (issue #3). Off darwin the
+      // reader finds nothing and the original read error is reported.
+      const fromKeychain = keychainReader();
+      if (fromKeychain === null) {
+        throw new Error(
+          `cannot read ${file} — is Claude Code installed and logged in? (${(e as Error).message})` +
+            (process.platform === "darwin"
+              ? `; the macOS Keychain has no "Claude Code-credentials" item for this user either`
+              : ""),
+        );
+      }
+      text = fromKeychain;
+      source = `the macOS Keychain ("Claude Code-credentials")`;
     }
     let raw: any;
     try {
@@ -557,14 +584,17 @@ export class ClaudeOAuth {
       // Windows tooling, but it makes JSON.parse fail on the very first byte.
       raw = JSON.parse(text.replace(/^\uFEFF/, ""));
     } catch (e) {
-      // Distinct from a read failure: the file WAS read, its contents are bad.
+      // Distinct from a read failure: the source WAS read, its contents are bad.
       throw new Error(
-        `${file} is not valid JSON (${(e as Error).message}) — Claude Code may have been interrupted while writing it`,
+        `${source} is not valid JSON (${(e as Error).message}) — Claude Code may have been interrupted while writing it`,
       );
     }
-    const o = raw?.claudeAiOauth;
+    // The Keychain item holds the same document the file did; a bare
+    // claudeAiOauth object (no wrapper) is accepted too, in case the storage
+    // shape ever peels it off.
+    const o = raw?.claudeAiOauth ?? (raw?.accessToken ? raw : undefined);
     if (!o?.accessToken) {
-      throw new Error(`no claudeAiOauth.accessToken in ${file} — sign in with Claude Code, then retry`);
+      throw new Error(`no claudeAiOauth.accessToken in ${source} — sign in with Claude Code, then retry`);
     }
     const t: StoredToken = {
       accessToken: o.accessToken,
@@ -579,8 +609,50 @@ export class ClaudeOAuth {
     this.tokenGeneration++;
     this.store.save(t);
     console.log(
-      `[auth] imported Claude Code session (expires ${new Date(t.expiresAt).toISOString()})`,
+      `[auth] imported Claude Code session from ${source} (expires ${new Date(t.expiresAt).toISOString()})`,
     );
     return t;
   }
+}
+
+// ---------------------------------------------------------------------------
+// macOS Keychain — where Claude Code 2.1.302+ keeps its credentials
+// ---------------------------------------------------------------------------
+
+/**
+ * Reads Claude Code's credentials from the macOS Keychain: service
+ * `Claude Code-credentials`, account = the local macOS username; `security
+ * find-generic-password … -w` prints the stored JSON on stdout. Returns null
+ * when there is nothing to find — not macOS (no `security` binary), keychain
+ * locked, no item for this user — so callers can keep their own error path.
+ * Never logs: the value is a credential.
+ */
+function readKeychainCredentials(): string | null {
+  let account: string;
+  try {
+    account = os.userInfo().username;
+  } catch {
+    return null;
+  }
+  if (!account) return null;
+  try {
+    const out = spawnSync(
+      "security",
+      ["find-generic-password", "-s", "Claude Code-credentials", "-a", account, "-w"],
+      { encoding: "utf8", timeout: 10_000 },
+    );
+    if (out.error || out.status !== 0 || !out.stdout?.trim()) return null;
+    return out.stdout.trim();
+  } catch {
+    return null;
+  }
+}
+
+/** The keychain reader in use — replaceable so non-macOS tests can exercise
+ *  the import fallback (there is no `security` CLI to spawn there). */
+let keychainReader: () => string | null = readKeychainCredentials;
+
+/** Test seam: swap the macOS Keychain reader; null restores the real one. */
+export function setKeychainReaderForTest(fn: (() => string | null) | null): void {
+  keychainReader = fn ?? readKeychainCredentials;
 }

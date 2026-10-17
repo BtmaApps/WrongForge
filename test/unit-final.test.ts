@@ -139,7 +139,8 @@ async function main(): Promise<void> {
     const chunks: Buffer[] = [];
     req.on("data", (c: Buffer) => chunks.push(c));
     req.on("end", () => {
-      tokenHits.push(JSON.parse(Buffer.concat(chunks).toString() || "{}"));
+      // the token endpoint speaks urlencoded (issue #3)
+      tokenHits.push(Object.fromEntries(new URLSearchParams(Buffer.concat(chunks).toString())));
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ access_token: "at", refresh_token: "rt", expires_in: 3600, scope: "user:inference" }));
     });

@@ -23,7 +23,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ClaudeOAuth } from "./oauth.js";
-import { PROTOCOL } from "./oauth.js";
+import { CLAUDE_CODE_UA, PROTOCOL } from "./oauth.js";
 import { applyCacheBreakpoints, defaultCacheMode, type CacheMode } from "./cache.js";
 import {
   applyEffortToBody,
@@ -36,11 +36,11 @@ import { currentContext } from "./context.js";
 import { dataDir } from "./paths.js";
 
 /**
- * Mimics the Claude Code CLI client signature. Captured verbatim from a real
- * Claude Code request (values are app/runtime-class metadata: nothing here is
- * unique to this machine or persisted between runs).
+ * Mimics the Claude Code CLI client signature (the user-agent itself lives in
+ * oauth.ts next to the other shared protocol constants). Captured verbatim
+ * from a real Claude Code request (values are app/runtime-class metadata:
+ * nothing here is unique to this machine or persisted between runs).
  */
-const CLAUDE_CODE_UA = "claude-cli/2.1.300 (external, sdk-cli)";
 const SESSION_ID = crypto.randomUUID(); // fresh per app run, never stored
 
 // ---------------------------------------------------------------- metadata id

@@ -181,12 +181,14 @@ URL also works — browsers cannot set headers on EventSource); only the shell
 is public, all data stays behind the key.
 
 `npm run import` reads `claudeAiOauth` from `~/.claude/.credentials.json`
-(Claude Code CLI's stored session) into this app's encrypted token store. The
-token refreshes through the same endpoint when it expires, so a single import
-keeps working — and when the refresh token dies, WrongForge adopts Claude
-  Code's current session from `~/.claude/.credentials.json` automatically;
-  `npm run import` is only needed when Claude Code's own token is dead too
-  (run Claude Code once and the next request recovers).
+(Claude Code CLI's stored session) into this app's encrypted token store — and,
+since Claude Code `2.1.302` moved its credentials into the **macOS Keychain**
+(service `Claude Code-credentials`), directly from there when the file no
+longer exists. The token refreshes through the same endpoint when it expires,
+so a single import keeps working — and when the refresh token dies, WrongForge
+adopts Claude Code's current session (file or Keychain) automatically;
+`npm run import` is only needed when Claude Code's own token is dead too
+(run Claude Code once and the next request recovers).
 
 > Loopback redirects (`http://127.0.0.1:…/callback`) are **not supported** for
 > this client: the server rejects them. The only registered redirect is

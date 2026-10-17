@@ -6,6 +6,19 @@ package.json and the git tags that drive the release workflow.
 
 ## [Unreleased]
 
+### Fixed
+- **Import and self-healing after Claude Code 2.1.302** (issue #3): Claude
+  Code moved its credentials from `~/.claude/.credentials.json` into the macOS
+  Keychain. `import` (and the automatic session recovery after a dead refresh
+  token) now falls back to reading the Keychain item `Claude Code-credentials`
+  when the legacy file is gone, so no manual `security find-generic-password`
+  export or launchd cron is needed.
+- **Token exchange / refresh 429s:** the token-endpoint request now carries a
+  urlencoded body under the Claude Code client signature (`claude-cli` UA,
+  `x-app: cli`) instead of a JSON body with a generic `anthropic` UA — the
+  shape the endpoint 429-rate-limited while Claude Code refreshed freely on
+  the same account and client id.
+
 ### Added
 - **Anthropic-compatible endpoint** — the server now mirrors the Anthropic
   Messages API itself (`POST /v1/messages` streaming and non-streaming,

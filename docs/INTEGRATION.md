@@ -25,7 +25,8 @@ work, follow progress, survive failures. Field-by-field details are in
    `ANTHROPIC_API_KEY` to use a console API key instead (see the README's
    privacy section for the trade-offs). The sign-in self-heals: when the
    subscription refresh token dies, WrongForge adopts Claude Code's own
-   session from `~/.claude/.credentials.json` automatically — the manual
+   session — from `~/.claude/.credentials.json` or, since Claude Code
+   `2.1.302`, the macOS Keychain — automatically. The manual
    `npm run import` ritual is only needed when Claude Code's token is dead
    too (run Claude Code once, and the next WrongForge request recovers).
 2. **Pick the safety settings** before the first task — the agent runs shell
