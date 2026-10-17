@@ -195,7 +195,7 @@ just to keep the tokens alive.
 
 > Loopback redirects (`http://127.0.0.1:…/callback`) are **not supported** for
 > this client: the server rejects them. The only registered redirect is
-> `https://console.anthropic.com/oauth/code/callback`, so the paste-the-code
+> `https://platform.claude.com/oauth/code/callback`, so the paste-the-code
 > flow (the standard Claude Code CLI flow) is the only login path.
 
 **REPL commands:** `/help /status /usage /model <id> /effort [lvl] /models /reset /tools /exit`.
@@ -531,10 +531,12 @@ without `onEvent` it prints to the terminal (REPL); with it, it emits structured
 `tool_error`, `context_cleared`, `error`) which `TaskManager` turns into the
 persisted task events above.
 
-OAuth note: the token endpoint is `console.anthropic.com/v1/oauth/token` and it
-expects a **JSON** body with the header `User-Agent: anthropic`; the exchange
-body carries `state` as well. `api.anthropic.com` rejects this flow. It is used
-only for `/v1/messages`, `/v1/models` and the usage/bootstrap calls.
+OAuth note: the token endpoint is `platform.claude.com/v1/oauth/token` (the
+old `console.anthropic.com` URL now 404s) and it expects a **JSON** body with
+the header `User-Agent: claude-cli/…` — a generic `anthropic` UA is what the
+endpoint 429-rate-limits (probe-verified, see `re/notes/findings.md` §11);
+the exchange body carries `state` as well. It is used only for `/v1/messages`,
+`/v1/models` and the usage/bootstrap calls.
 
 ## Configuration
 

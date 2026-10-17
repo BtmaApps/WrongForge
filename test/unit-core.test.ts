@@ -171,7 +171,7 @@ async function main(): Promise<void> {
     process.env.CLAUDE_OAUTH_CLIENT_ID = "env-id";
     process.env.CLAUDE_OAUTH_AUTHORIZE_URL = "https://a.example";
     const c = loadOAuthConfig()!;
-    assert(c.clientId === "env-id" && c.authorizeUrl === "https://a.example" && c.tokenUrl.includes("console.anthropic.com"), "loadOAuthConfig: env wins, defaults fill");
+    assert(c.clientId === "env-id" && c.authorizeUrl === "https://a.example" && c.tokenUrl.includes("platform.claude.com"), "loadOAuthConfig: env wins, defaults fill");
     delete process.env.CLAUDE_OAUTH_CLIENT_ID;
     delete process.env.CLAUDE_OAUTH_AUTHORIZE_URL;
     const file = path.join(home1, "oauth.json");

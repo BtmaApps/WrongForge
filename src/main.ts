@@ -120,7 +120,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
     if (args.includes("--loopback")) {
       console.log(
         "Note: --loopback is not supported — the only redirect registered for\n" +
-        "this client is https://console.anthropic.com/oauth/code/callback\n" +
+        "this client is https://platform.claude.com/oauth/code/callback\n" +
         "(the server rejects loopback redirect URIs). Using the standard\n" +
         "paste-the-code flow.\n",
       );

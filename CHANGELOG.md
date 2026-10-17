@@ -21,11 +21,14 @@ package.json and the git tags that drive the release workflow.
   token) now falls back to reading the Keychain item `Claude Code-credentials`
   when the legacy file is gone, so no manual `security find-generic-password`
   export or launchd cron is needed.
-- **Token exchange / refresh 429s:** the token-endpoint request now carries a
-  urlencoded body under the Claude Code client signature (`claude-cli` UA,
-  `x-app: cli`) instead of a JSON body with a generic `anthropic` UA — the
-  shape the endpoint 429-rate-limited while Claude Code refreshed freely on
-  the same account and client id.
+- **Token exchange / refresh 429s — root cause found and probe-verified**
+  (issue #3, `re/notes/findings.md` §11): the token endpoint 429-rate-limits
+  the generic `User-Agent: anthropic` WrongForge sent — the same JSON request
+  with a `claude-cli/…` UA (or no UA) is processed normally. The request now
+  carries the Claude Code user-agent, the refresh body includes the granted
+  `scope` (both carved from CC 2.1.300), and the default OAuth endpoints moved
+  to `platform.claude.com` — the old `console.anthropic.com/v1/oauth/token`
+  now answers 404. Existing `oauth.json` / env overrides keep winning.
 
 ### Added
 - **Anthropic-compatible endpoint** — the server now mirrors the Anthropic

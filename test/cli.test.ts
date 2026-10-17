@@ -85,13 +85,7 @@ function mockAnthropic(): Promise<{ port: number; close: () => void; bodies: any
     const chunks: Buffer[] = [];
     req.on("data", (c: Buffer) => chunks.push(c));
     req.on("end", () => {
-      // /v1/oauth/token speaks urlencoded (issue #3); /v1/messages stays JSON
-      const raw = Buffer.concat(chunks).toString();
-      const body = req.url === "/v1/oauth/token"
-        ? Object.fromEntries(new URLSearchParams(raw))
-        : raw
-          ? JSON.parse(raw)
-          : null;
+      const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : null;
       if (req.url === "/v1/oauth/token") {
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ access_token: "at", refresh_token: "rt", expires_in: 3600, scope: "user:inference" }));

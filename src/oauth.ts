@@ -1,9 +1,10 @@
 /**
  * Claude OAuth — the same flow used by Claude Code / Claude Desktop.
  *
- * Wire protocol (verified against the live endpoints):
+ * Wire protocol (verified against the live endpoints + carved from CC 2.1.300,
+ * re/notes/findings.md §11):
  *   - Authorize : {authorizeUrl}  (PKCE S256, public client)
- *   - Token     : POST {tokenUrl}  (urlencoded body)
+ *   - Token     : POST {tokenUrl}  (JSON body, claude-cli User-Agent)
  *   - Signing   : Authorization: Bearer <token> + anthropic-beta: oauth-2025-04-20
  *
  * Client identity values (client ID etc.) are NOT part of the code — they are
@@ -138,14 +139,13 @@ class TokenStore {
 // ---------------------------------------------------------------------------
 
 /**
- * Token endpoint call — a urlencoded OAuth body under the Claude Code client
- * signature:
- *   Content-Type: application/x-www-form-urlencoded
- *   User-Agent: claude-cli/<v> (external, sdk-cli)   +   x-app: cli
- * A JSON body with a generic `anthropic` UA used to work, but the endpoint
- * now 429-rate-limits that shape while Claude Code's own requests refresh
- * freely on the same account, IP and client id (issue #3) — the request
- * format was the only difference left.
+ * Token endpoint call — a JSON body (the shape Claude Code itself sends,
+ * carved from CC 2.1.300: `Tt.post(TOKEN_URL, body, {headers:{"Content-Type":
+ * "application/json"}, timeout:30000})`) under the Claude Code user-agent.
+ * The body format does not gate the endpoint, the User-Agent does: a generic
+ * `anthropic` UA gets 429 rate_limit_error while claude-cli / no-UA requests
+ * are processed (400 invalid_grant) — probe-verified, re/notes/findings.md
+ * §11; that UA was the root cause of issue #3's refresh failures.
  *
  * The endpoint rate-limits aggressively; on HTTP 429 this waits (honoring
  * Retry-After) and retries a few times before giving up.
@@ -160,12 +160,11 @@ async function tokenPost(
     const res = await fetch(url, {
       method: "POST",
       headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
+        "Content-Type": "application/json",
         Accept: "application/json",
         "User-Agent": CLAUDE_CODE_UA,
-        "x-app": "cli",
       },
-      body: new URLSearchParams(body).toString(),
+      body: JSON.stringify(body),
     });
     const text = await res.text();
     let json: any = null;
@@ -407,6 +406,8 @@ export class ClaudeOAuth {
           grant_type: "refresh_token",
           client_id: this.requireConfig().clientId,
           refresh_token: current.refreshToken,
+          // CC sends the granted scope on every refresh (mod-0150 See())
+          scope: current.scope,
         });
         // The session was replaced while we were suspended (login, import or
         // logout): this response belongs to a superseded token — drop it rather
@@ -469,6 +470,7 @@ export class ClaudeOAuth {
         grant_type: "refresh_token",
         client_id: this.requireConfig().clientId,
         refresh_token: imported.refreshToken,
+        scope: imported.scope,
       });
       if (res.status === 200 && res.json?.access_token) {
         console.warn("[auth] refresh token rejected — adopted Claude Code's session and refreshed it");

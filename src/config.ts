@@ -47,20 +47,23 @@ export function loadOAuthConfig(): OAuthConfig | null {
 
   return {
     clientId,
+    // Claude Code's own production endpoints (carved from CC 2.1.300,
+    // re/notes/findings.md §11): the old console.anthropic.com token URL now
+    // answers 404 — platform.claude.com is the live host.
     authorizeUrl:
       process.env.ANTHROPIC_AUTHORIZE_URL ??
       process.env.CLAUDE_OAUTH_AUTHORIZE_URL ??
       fileCfg.authorizeUrl ??
-      "https://console.anthropic.com/oauth/authorize",
+      "https://platform.claude.com/oauth/authorize",
     tokenUrl:
       process.env.ANTHROPIC_TOKEN_URL ??
       process.env.CLAUDE_OAUTH_TOKEN_URL ??
       fileCfg.tokenUrl ??
-      "https://console.anthropic.com/v1/oauth/token",
+      "https://platform.claude.com/v1/oauth/token",
     redirectUri:
       process.env.CLAUDE_OAUTH_REDIRECT_URI ??
       fileCfg.redirectUri ??
-      "https://console.anthropic.com/oauth/code/callback",
+      "https://platform.claude.com/oauth/code/callback",
     scope:
       process.env.CLAUDE_OAUTH_SCOPE ??
       fileCfg.scope ??

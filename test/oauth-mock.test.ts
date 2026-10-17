@@ -12,10 +12,6 @@ import * as os from "node:os";
 import { ClaudeOAuth, CLAUDE_CODE_UA, parsePastedCode, setKeychainReaderForTest } from "../src/oauth.js";
 import { oauthFetch } from "../src/provider.js";
 
-// the token endpoint speaks urlencoded (issue #3: the Claude Code signature)
-const formBody = (raw: string): Record<string, string> =>
-  Object.fromEntries(new URLSearchParams(raw));
-
 // Temp dirs live under the OS temp dir and are removed on exit (pass or fail).
 const tmpDirs: string[] = [];
 function mkTmp(prefix: string): string {
@@ -72,7 +68,7 @@ function main(): Promise<void> {
         if (req.url === "/v1/oauth/token") {
           seen.tokenRequests.push({
             headers: req.headers,
-            body: formBody(body),
+            body: JSON.parse(body),
           });
           tokenCall++;
           // first call: 429 with Retry-After: 0 (exercises the retry path),
@@ -157,16 +153,12 @@ function main(): Promise<void> {
           "exchange body is correct",
         );
         check(
-          String(ex.headers["content-type"]).includes("application/x-www-form-urlencoded"),
-          "token endpoint receives a urlencoded body",
+          String(ex.headers["content-type"]).includes("application/json"),
+          "token endpoint receives a JSON body",
         );
         check(
           ex.headers["user-agent"] === CLAUDE_CODE_UA,
-          "token endpoint receives the Claude Code User-Agent",
-        );
-        check(
-          ex.headers["x-app"] === "cli",
-          "token endpoint receives the Claude Code x-app marker",
+          "token endpoint receives the Claude Code User-Agent (the generic anthropic UA is what it 429s)",
         );
         check(
           !("authorization" in ex.headers),
@@ -180,8 +172,9 @@ function main(): Promise<void> {
         const rf = seen.tokenRequests[2];
         check(
           rf.body.grant_type === "refresh_token" &&
-            rf.body.refresh_token === "rt-1",
-          "refresh body is correct",
+            rf.body.refresh_token === "rt-1" &&
+            rf.body.scope === "user:inference user:profile",
+          "refresh body is correct (incl. the granted scope, like Claude Code)",
         );
 
         // 3) oauthFetch: Bearer + beta injection
@@ -244,7 +237,7 @@ function main(): Promise<void> {
             req.on("data", (c: Buffer) => chunks.push(c));
             req.on("end", () => {
               tokenCalls++;
-              const b = formBody(Buffer.concat(chunks).toString("utf8"));
+              const b = JSON.parse(Buffer.concat(chunks).toString("utf8"));
               if (b.grant_type === "refresh_token" && b.refresh_token === "dead-rt") {
                 res.writeHead(400, { "Content-Type": "application/json" });
                 res.end(JSON.stringify({ error: "invalid_grant", error_description: "refresh token expired" }));
@@ -313,7 +306,7 @@ function main(): Promise<void> {
             const chunks: Buffer[] = [];
             req.on("data", (c: Buffer) => chunks.push(c));
             req.on("end", () => {
-              const b = formBody(Buffer.concat(chunks).toString("utf8"));
+              const b = JSON.parse(Buffer.concat(chunks).toString("utf8"));
               res.writeHead(200, { "Content-Type": "application/json" });
               if (b.grant_type === "refresh_token") {
                 arrived();
