@@ -188,7 +188,10 @@ longer exists. The token refreshes through the same endpoint when it expires,
 so a single import keeps working — and when the refresh token dies, WrongForge
 adopts Claude Code's current session (file or Keychain) automatically;
 `npm run import` is only needed when Claude Code's own token is dead too
-(run Claude Code once and the next request recovers).
+(run Claude Code once and the next request recovers). While the server runs,
+an idle keep-alive refreshes the session on its own (see
+`WRONGFORGE_TOKEN_KEEPALIVE_MS`) — no need to open Claude Code periodically
+just to keep the tokens alive.
 
 > Loopback redirects (`http://127.0.0.1:…/callback`) are **not supported** for
 > this client: the server rejects them. The only registered redirect is
@@ -553,6 +556,7 @@ Environment variables (all optional unless noted):
 | `WRONGFORGE_MAX_CONCURRENCY` | Tasks running at once (2) |
 | `WRONGFORGE_WORKDIR` / `_ALLOWED_ROOTS` / `_WORKDIR_LOCK` | Default workdir; allowed start roots (`;` on Windows, `:` elsewhere); lock workdirs by default |
 | `WRONGFORGE_TASK_TIMEOUT_MS` / `_HEARTBEAT_MS` | Default task timeout (30 min) / heartbeat interval (15 s) |
+| `WRONGFORGE_TOKEN_KEEPALIVE_MS` | OAuth keep-alive check interval (5 min; `0` disables) — refreshes the session while the server idles so the token chain never goes stale |
 | `WRONGFORGE_WEBHOOK_SECRET` / `_WEBHOOK_MAX_ATTEMPTS` | Webhook HMAC key (default: API key) / attempts (6) |
 | `WRONGFORGE_CACHE` | Default cache mode `5m\|1h\|off` (1h) |
 | `WRONGFORGE_EFFORT` | Default reasoning effort `low\|medium\|high\|off` (high), clamped to model support |

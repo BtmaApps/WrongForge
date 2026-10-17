@@ -875,6 +875,35 @@ export async function startEnvServer(): Promise<EnvServer> {
     });
   });
 
+  // OAuth keep-alive: an idle server never calls getAccessToken, so the token
+  // chain would go stale between tasks and the refresh token would eventually
+  // die of disuse — the "run Claude Code once in a while" ritual this removes.
+  // Checks every WRONGFORGE_TOKEN_KEEPALIVE_MS (default 5 min; 0 disables) and
+  // refreshes once the access token has <15 min left, roughly the cadence of
+  // an actively used client. A dead session backs off exponentially (capped
+  // at 1 h) instead of hammering the token endpoint every interval.
+  const keepAliveMs = Number(process.env.WRONGFORGE_TOKEN_KEEPALIVE_MS ?? 5 * 60_000);
+  let keepAliveBackoffUntil = 0;
+  let keepAliveFailures = 0;
+  const keepAlive = (): void => {
+    if (!Number.isFinite(keepAliveMs) || keepAliveMs <= 0 || !oauth.signedIn) return;
+    if (Date.now() < keepAliveBackoffUntil) return;
+    void oauth.getAccessToken(15 * 60_000).then(
+      () => {
+        keepAliveFailures = 0;
+      },
+      (e) => {
+        keepAliveFailures++;
+        const waitMs = Math.min(keepAliveMs * 2 ** keepAliveFailures, 60 * 60_000);
+        keepAliveBackoffUntil = Date.now() + waitMs;
+        app.logger.warn("auth.keepalive_failed", { error: (e as Error).message, retry_in_ms: waitMs });
+      },
+    );
+  };
+  keepAlive();
+  const keepAliveTimer = setInterval(keepAlive, keepAliveMs);
+  keepAliveTimer.unref();
+
   let stopping = false;
   const shutdown = (signal = "shutdown"): void => {
     if (stopping) return;
@@ -882,6 +911,7 @@ export async function startEnvServer(): Promise<EnvServer> {
     console.log(`\n${signal}: stopping — interrupting running tasks…`);
     app.logger.info("server.stopping", { signal });
     stopMaintenance();
+    clearInterval(keepAliveTimer);
     server.close();
     void (async () => {
       await app.manager.shutdown();

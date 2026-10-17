@@ -523,10 +523,14 @@ export class ClaudeOAuth {
     return t;
   }
 
-  /** Fresh access token; proactively refreshes within the last 60s. */
-  async getAccessToken(): Promise<string> {
+  /**
+   * Fresh access token; proactively refreshes within the last `refreshMarginMs`
+   * (default 60 s). The server's idle keep-alive passes a wider margin so the
+   * token chain never goes stale between tasks — see startEnvServer.
+   */
+  async getAccessToken(refreshMarginMs = 60_000): Promise<string> {
     if (!this.token) throw new Error("not signed in — run `npm run login` first");
-    if (this.token.expiresAt - 60_000 <= Date.now()) {
+    if (this.token.expiresAt - refreshMarginMs <= Date.now()) {
       const fresh = await this.refresh();
       if (!fresh) {
         const cause = this.lastRefreshError ? ` (${this.lastRefreshError})` : "";

@@ -6,6 +6,14 @@ package.json and the git tags that drive the release workflow.
 
 ## [Unreleased]
 
+### Added
+- **OAuth idle keep-alive:** the server now refreshes its session on its own
+  while running (checks every `WRONGFORGE_TOKEN_KEEPALIVE_MS`, default 5 min;
+  refreshes once the access token has <15 min left, with exponential backoff
+  after failures). An idle server used to leave the token chain untouched
+  between tasks until the refresh token died of disuse — the "run Claude Code
+  once in a while" ritual; running the server is now enough.
+
 ### Fixed
 - **Import and self-healing after Claude Code 2.1.302** (issue #3): Claude
   Code moved its credentials from `~/.claude/.credentials.json` into the macOS

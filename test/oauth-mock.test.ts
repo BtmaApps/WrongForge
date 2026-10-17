@@ -419,8 +419,21 @@ function main(): Promise<void> {
           }
         }
 
+        // 8) getAccessToken(margin): a wide margin refreshes a still-valid
+        //    token NOW — the server's idle keep-alive rides this contract
+        //    instead of waiting for the last 60 seconds
+        {
+          const oauth9 = new ClaudeOAuth(path.join(mkTmp("wf-margin-"), "tokens.json"));
+          await oauth9.exchangeCode("c9", "v9", "https://console.anthropic.com/oauth/code/callback", "user:inference");
+          const callsBefore = tokenCall;
+          const t = await oauth9.getAccessToken(61 * 60_000);
+          check(t === "at-2" && tokenCall === callsBefore + 1, "a wide refresh margin triggers an immediate refresh");
+          const t2 = await oauth9.getAccessToken();
+          check(t2 === "at-2" && tokenCall === callsBefore + 1, "the default margin leaves a fresh token alone");
+        }
+
         server.close();
-        console.log("ALL TESTS PASSED ✓ (exchange, refresh, header injection, import, Keychain fallback, refresh-token recovery, stale-refresh race)");
+        console.log("ALL TESTS PASSED ✓ (exchange, refresh, header injection, import, Keychain fallback, refresh-token recovery, stale-refresh race, keep-alive margin)");
         resolve();
       } catch (e) {
         server.close();
