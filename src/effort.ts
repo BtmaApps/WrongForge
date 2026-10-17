@@ -123,9 +123,12 @@ export function resolveEffort(setting: EffortSetting, model: string): ResolvedEf
  * a top-level field (a top-level `effort` is rejected with "Extra inputs are
  * not permitted"), and the effort-2025-11-24 beta header travels alongside
  * (provider.ts). The provider-layer counterpart of applyCacheBreakpoints.
+ * A value already in the body (a proxied client's own choice) is returned
+ * untouched — the client's intent always wins over the server default.
  * Returns the value that was set, or null when the field stays absent.
  */
 export function applyEffortToBody(body: any, setting: EffortSetting): Effort | null {
+  if (typeof body?.output_config?.effort === "string") return body.output_config.effort as Effort;
   const resolved = resolveEffort(setting, String(body?.model ?? ""));
   if (!resolved.effort) return null;
   body.output_config = { ...(body.output_config ?? {}), effort: resolved.effort };

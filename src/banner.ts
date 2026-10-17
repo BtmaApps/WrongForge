@@ -22,6 +22,8 @@ export interface BannerInfo {
   defaultWorkdir?: string | null;
   /** Number of configured MCP servers. */
   mcpServers?: number;
+  /** URL Anthropic clients should set as ANTHROPIC_BASE_URL (null = proxy surface off). */
+  proxyUrl?: string | null;
   /** Tasks from the previous run that were marked failed(server_restarted). */
   recoveredTasks?: number;
 }
@@ -91,6 +93,12 @@ export function renderBanner(i: BannerInfo, color = false): string {
     lines.push(
       `${bold("MCP")}         ${i.mcpServers ? `${i.mcpServers} server(s) configured` : dim("none yet")}  ${dim("(npm run mcp -- help)")}`,
     );
+  }
+  if (i.proxyUrl) {
+    lines.push(
+      `${bold("Anthropic")}    point clients at this URL as ${bold("ANTHROPIC_BASE_URL")} (key = the API key)`,
+    );
+    lines.push(`               ${cyan(i.proxyUrl)}  ${dim("(POST /v1/messages, GET /v1/models)")}`);
   }
   if (i.promptFiles) {
     lines.push(

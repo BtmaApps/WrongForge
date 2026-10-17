@@ -6,6 +6,19 @@ package.json and the git tags that drive the release workflow.
 
 ## [Unreleased]
 
+### Added
+- **Anthropic-compatible endpoint** — the server now mirrors the Anthropic
+  Messages API itself (`POST /v1/messages` streaming and non-streaming,
+  `POST /v1/messages/count_tokens`, `GET /v1/models[/:id]`). Any Anthropic
+  client (Claude Code, the SDKs, WrongStack) can point `ANTHROPIC_BASE_URL`
+  at WrongForge and use the server's credentials: with OAuth the request
+  rides the same Claude Code client signature the agent uses (subscription
+  billing, 401 auto-refresh, 400 self-heal); with `ANTHROPIC_API_KEY` it is a
+  byte-for-byte passthrough. Client auth accepts `x-api-key` in addition to
+  Bearer on the whole API. Responses (status, SSE, rate-limit headers, error
+  envelopes) pass through untouched. `WRONGFORGE_PROXY=0` disables the
+  surface; `WRONGFORGE_PROXY_MAX_BODY` caps bodies (default 32 MB).
+
 ## [0.4.2] — 2026-10-16
 
 ### Fixed

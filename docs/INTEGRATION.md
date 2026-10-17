@@ -11,6 +11,7 @@ work, follow progress, survive failures. Field-by-field details are in
 - [Sessions: multi-step work](#sessions-multi-step-work)
 - [Parallel work and workdirs](#parallel-work-and-workdirs)
 - [Giving the agent more tools](#giving-the-agent-more-tools)
+- [Anthropic-compatible endpoint](#anthropic-compatible-endpoint)
 - [Teaching the agent your tooling (`prompts/`)](#teaching-the-agent-your-tooling-prompts)
 - [Reliability patterns](#reliability-patterns)
 - [Client examples](#client-examples)
@@ -173,6 +174,60 @@ earlier conversation, including what files it touched:
 Gateway/MCP tool calls show up in the event log as `tool.*` events with
 `external: true`; a `tools.loaded` event at task start lists what was loaded
 (and any warnings).
+
+## Anthropic-compatible endpoint
+
+Besides the task API, the server mirrors the **Anthropic Messages API** itself:
+
+- `POST /v1/messages` — streaming and non-streaming
+- `POST /v1/messages/count_tokens`
+- `GET /v1/models`, `GET /v1/models/:id`
+
+Any Anthropic client — Claude Code, the official SDKs, another WrongForge,
+your own code — can use the credentials the server holds instead of bringing
+its own. Authentication is the server's API key (the same one as the task API),
+sent as `x-api-key` (what the Anthropic SDKs send) or `Authorization: Bearer`:
+
+```bash
+export ANTHROPIC_BASE_URL=http://127.0.0.1:8787
+export ANTHROPIC_API_KEY=<the WrongForge server key>
+```
+
+```js
+// Node
+import Anthropic from "@anthropic-ai/sdk";
+const client = new Anthropic({ baseURL: "http://127.0.0.1:8787", apiKey: WF_KEY });
+```
+
+```python
+# Python
+client = Anthropic(base_url="http://127.0.0.1:8787", api_key=WF_KEY)
+```
+
+With that, Claude Code (`claude`), SDK apps and prototypes all bill to the
+server's account — no separate key distribution.
+
+How requests travel upstream (same two modes as the agent itself, code:
+`src/proxy.ts`):
+
+| Server credential | Upstream behavior |
+|---|---|
+| OAuth (default) | Forwarded with the Claude Code client signature the agent uses — Bearer token, captured beta headers and the body fields the subscription requires. Streaming turns carry the CC `max_tokens` ceiling (128 000); 401s auto-refresh; the 400 self-heal applies. Client `output_config.effort` and `cache_control` markers are preserved. |
+| `ANTHROPIC_API_KEY` set | Byte-for-byte passthrough — only the credential is swapped, the body is untouched. |
+
+Notes:
+
+- Responses pass through 1:1: status codes, SSE events, rate-limit and
+  `anthropic-*` headers, error envelopes. The client's server key is never
+  forwarded upstream.
+- Proxy request bodies are capped at `WRONGFORGE_PROXY_MAX_BODY` (default
+  32 MB) — larger than the task API's 1 MB, because Messages bodies carry long
+  contexts and inline images.
+- `WRONGFORGE_PROXY=0` turns the surface off entirely.
+- Proxied traffic appears in the dashboard's traffic view (`http.request`
+  frames) like any other call; plan usage is served by `GET /v1/usage`.
+- The proxy shares the subscription's rate limits with the agent's own tasks —
+  heavy parallel clients and task bursts draw from the same plan window.
 
 ## Teaching the agent your tooling (`prompts/`)
 

@@ -28,7 +28,7 @@ no other runtime services are needed.
 - [Models](#models) · [Installation](#installation) · [Usage](#usage)
 - [Privacy — what is sent](#privacy--what-is-sent-to-the-other-side)
 - [Tools](#tools) · [MCP servers](#mcp-servers) · [Tool gateway](#tool-gateway)
-- [HTTP task API](#http-task-api) · [Sessions & context](#sessions--context-management)
+- [HTTP task API](#http-task-api) · [Anthropic-compatible endpoint](#anthropic-compatible-endpoint) · [Sessions & context](#sessions--context-management)
 - [Architecture](#architecture) · [Configuration](#configuration) · [Data directory](#data-directory)
 - [Tests](#tests) · [Security notes](#security-notes) · [Known limitations](#known-limitations)
 
@@ -418,6 +418,47 @@ Full reference: **[docs/TASKS-API.md](docs/TASKS-API.md)** (protocol) and
 **[docs/INTEGRATION.md](docs/INTEGRATION.md)** (building a client: patterns,
 examples, troubleshooting). Index: [docs/API.md](docs/API.md).
 
+## Anthropic-compatible endpoint
+
+The same server also mirrors the Anthropic Messages API itself. Any Anthropic
+client — Claude Code, the official Node/Python SDKs, WrongStack, curl — can
+point `ANTHROPIC_BASE_URL` at WrongForge and use the credentials the server
+holds (the OAuth subscription, or its `ANTHROPIC_API_KEY`):
+
+```bash
+export ANTHROPIC_BASE_URL=http://127.0.0.1:8787
+export ANTHROPIC_API_KEY=$KEY          # the WrongForge server key (x-api-key or Bearer)
+
+# e.g. Claude Code on the server's subscription:
+ANTHROPIC_BASE_URL=http://127.0.0.1:8787 ANTHROPIC_API_KEY=$KEY claude
+```
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /v1/messages` | Messages API — streaming and non-streaming, passed through 1:1 |
+| `POST /v1/messages/count_tokens` | token counting |
+| `GET /v1/models`, `GET /v1/models/:id` | model catalog |
+
+Two upstream modes, chosen exactly like the agent's own requests
+(code: `src/proxy.ts`):
+
+- **OAuth (default):** requests ride the same Claude Code client signature the
+  agent uses — Bearer token, the captured beta-header list and the body fields
+  the subscription requires — so the plan serves them (without the costume the
+  backend answers 400 "Third-party apps now draw from your extra usage").
+  Streaming turns are sent with the CC `max_tokens` ceiling (128 000), 401s
+  auto-refresh, the 400 self-heal applies. Client-sent `output_config.effort`
+  and `cache_control` markers are preserved; missing cache breakpoints are
+  added like on the agent's own requests.
+- **`ANTHROPIC_API_KEY` set:** pure byte-for-byte passthrough — only the
+  credential is swapped in, nothing is added to or removed from the body.
+
+Responses pass through untouched: status, SSE events, rate-limit and
+`anthropic-*` headers, error envelopes. The client's WrongForge key is never
+forwarded upstream. `WRONGFORGE_PROXY=0` turns the surface off;
+`WRONGFORGE_PROXY_MAX_BODY` caps request bodies (default 32 MB — the task
+API's 1 MB is too small for long contexts and inline images).
+
 ## Sessions & context management
 
 A session (`session_id`) keeps the conversation across tasks; it is persisted
@@ -503,6 +544,8 @@ Environment variables (all optional unless noted):
 | `ANTHROPIC_TOKEN_URL`, `CLAUDE_OAUTH_*` | OAuth endpoints / client registration overrides (`CLIENT_ID`, `AUTHORIZE_URL`, `TOKEN_URL`, `REDIRECT_URI`, `SCOPE`); `CLAUDE_OAUTH_CONFIG` = config file path |
 | `AGENT_API_KEY` | Server Bearer key (≥ 16 chars). Unset → saved/generated key |
 | `PORT` / `HOST` | Server listen port (8787) / address (127.0.0.1) |
+| `WRONGFORGE_PROXY` | Anthropic-compatible `/v1/messages` + `/v1/models` proxy surface (`0` disables; on by default) |
+| `WRONGFORGE_PROXY_MAX_BODY` | Proxy request body cap in bytes (32 MB) |
 | `WRONGFORGE_HOME` | Data directory (default `~/.wrongforge`) |
 | `WRONGFORGE_LOG_DIR` / `_LOG_LEVEL` / `_LOG_STDERR` / `_LOG_MAX_MB` | Logging: dir, `debug\|info\|warn\|error`, mirror to stderr, daily-file size cap (50) |
 | `WRONGFORGE_MAX_CONCURRENCY` | Tasks running at once (2) |

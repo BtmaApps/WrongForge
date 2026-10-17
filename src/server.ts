@@ -11,9 +11,11 @@
  *   *      /v1/sessions…                   durable conversations (+ compact)
  *   *      /v1/mcp/servers…                MCP server configuration
  *   POST   /v1/maintenance/run             log/task/session housekeeping now
+ *   *      /v1/messages, /v1/models       Anthropic-compatible proxy (src/proxy.ts)
  *   GET    /v1/info, /v1/tools, /health
  *
- * Auth: `Authorization: Bearer <API key>` on everything except /health.
+ * Auth: `Authorization: Bearer <API key>` (or `x-api-key`, as Anthropic
+ * clients send it) on everything except /health.
  * Errors: { "error": { "code": "...", "message": "..." } }
  */
 
@@ -31,6 +33,7 @@ import { DEFAULT_MODEL, KNOWN_MODELS } from "./agent.js";
 import { effortSupport } from "./effort.js";
 import { APP_NAME, VERSION, dataDir } from "./paths.js";
 import { resolveApiKey } from "./apikey.js";
+import { createProxyHandler, proxyEnabled, proxyMaxBody } from "./proxy.js";
 import { printBanner } from "./banner.js";
 import { loadPromptFiles } from "./prompt.js";
 import { SubmitError } from "./tasks/manager.js";
@@ -129,6 +132,7 @@ export function createAgentServer(opts: ServerOptions): http.Server {
   const manager = app.manager;
   const keyBuf = Buffer.from(opts.apiKey);
   const webuiDir = opts.webuiDir ?? DEFAULT_WEBUI_DIR;
+  const proxy = createProxyHandler({ oauth, logger: app.logger });
 
   const webuiBuilt = (): boolean => {
     try {
@@ -218,14 +222,16 @@ export function createAgentServer(opts: ServerOptions): http.Server {
   };
 
   /**
-   * `Authorization: Bearer <key>` or `?key=` — browsers cannot set headers on
-   * EventSource/img tags, so the query form keeps the dashboard (and only it;
-   * the key is a localhost server key) workable. Never logged: http.request
-   * logs the path without the query string.
+   * `Authorization: Bearer <key>`, `x-api-key` (what Anthropic SDK clients
+   * send when the server key is set as their API key) or `?key=` — browsers
+   * cannot set headers on EventSource/img tags, so the query form keeps the
+   * dashboard (and only it; the key is a localhost server key) workable.
+   * Never logged: http.request logs the path without the query string.
    */
   const authorized = (req: http.IncomingMessage, url: URL): boolean => {
     const m = /^Bearer (.+)$/i.exec(req.headers.authorization ?? "");
-    const candidate = m?.[1] ?? url.searchParams.get("key") ?? "";
+    const h = req.headers["x-api-key"];
+    const candidate = m?.[1] ?? (typeof h === "string" ? h : undefined) ?? url.searchParams.get("key") ?? "";
     if (!candidate) return false;
     const got = Buffer.from(candidate);
     return got.length === keyBuf.length && crypto.timingSafeEqual(got, keyBuf);
@@ -538,6 +544,13 @@ export function createAgentServer(opts: ServerOptions): http.Server {
       /** A newer GitHub release was seen at startup / by the periodic check. */
       update: lastUpdateCheck(),
       limits: { max_body_bytes: MAX_BODY, max_steps: 500, default_max_steps: 50 },
+      proxy: {
+        enabled: proxyEnabled(),
+        /** Anthropic-compatible endpoints any SDK / Claude Code can target
+         * via ANTHROPIC_BASE_URL (client key = this server's API key). */
+        endpoints: ["POST /v1/messages", "POST /v1/messages/count_tokens", "GET /v1/models", "GET /v1/models/:id"],
+        max_body_bytes: proxyMaxBody(),
+      },
       webhook: { signature: "HMAC-SHA256 over '<timestamp>.<body>', header X-WrongForge-Signature: sha256=<hex>", key: process.env.WRONGFORGE_WEBHOOK_SECRET ? "WRONGFORGE_WEBHOOK_SECRET" : "the API key" },
       tools: Object.keys(agentTools),
       tool_guides: loadPromptFiles(opts.promptDir).map((f) => f.name),
@@ -724,6 +737,10 @@ export function createAgentServer(opts: ServerOptions): http.Server {
       }
     } else if (area === "events" && parts.length === 2 && method === "GET") {
       return globalEvents(req, res, url);
+    } else if (area === "messages" || area === "models") {
+      // Anthropic-compatible proxy surface (src/proxy.ts) — same key auth as
+      // everything else; returns false for shapes it does not serve
+      if (proxyEnabled() && (await proxy(req, res, method, url.pathname, url.search))) return;
     } else if (area === "sessions") {
       if (await sessionRoutes(req, res, url, parts)) return;
     } else if (area === "mcp") {
@@ -837,6 +854,7 @@ export async function startEnvServer(): Promise<EnvServer> {
         defaultWorkdir: app.defaultWorkdir ?? null,
         mcpServers: app.mcp.status().servers.length,
         recoveredTasks: recovered.length,
+        proxyUrl: proxyEnabled() ? `http://${host}:${port}` : null,
       });
       if (fs.existsSync(path.join(DEFAULT_WEBUI_DIR, "index.html"))) {
         console.log(`  dashboard:   http://${host}:${port}/`);

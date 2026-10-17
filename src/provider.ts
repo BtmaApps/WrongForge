@@ -267,7 +267,11 @@ function withClaudeCodeSystem(
       { type: "text", text: CC_AGENT_IDENTITY_BLOCK },
     ];
     if (Array.isArray(body.system)) {
-      if (body.system[0]?.text !== CC_BILLING_HEADER_BLOCK) {
+      // any billing marker — ours, another Claude Code version's, or one a
+      // chained proxy already added — means the costume is on; never stack
+      // a second block on top of it
+      const first = String(body.system[0]?.text ?? "");
+      if (!first.startsWith("x-anthropic-billing-header:")) {
         body.system = [...ccBlocks, ...body.system];
       }
     } else if (typeof body.system === "string") {

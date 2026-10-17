@@ -98,7 +98,7 @@ export const defaultScript: Script = (ctx) => {
 };
 
 export class Fake {
-  requests: { body: any; headers: http.IncomingHttpHeaders; n: number }[] = [];
+  requests: { body: any; headers: http.IncomingHttpHeaders; n: number; method: string; url: string }[] = [];
   script: Script = defaultScript;
   tokenCalls = 0;
   readonly server: http.Server;
@@ -127,7 +127,7 @@ export class Fake {
   }
 
   /** Requests that are real task turns (not summaries). */
-  turns(): { body: any; headers: http.IncomingHttpHeaders; n: number }[] {
+  turns(): { body: any; headers: http.IncomingHttpHeaders; n: number; method: string; url: string }[] {
     return this.requests.filter((r) => !JSON.stringify(r.body.system ?? "").includes("compress the history"));
   }
 
@@ -138,11 +138,50 @@ export class Fake {
       res.end(JSON.stringify({ access_token: "at-test", refresh_token: "rt-test", expires_in: 3600, scope: "user:inference user:profile" }));
       return;
     }
+    // proxy-surface support: count_tokens + models (before the /v1/messages
+    // prefix match below — /v1/messages/count_tokens starts with /v1/messages).
+    // Paths compare without the query: provider.ts appends ?beta=true.
+    const pathOnly = (req.url ?? "").split("?")[0];
+    if (pathOnly === "/v1/messages/count_tokens") {
+      let body: any = {};
+      try {
+        body = raw ? JSON.parse(raw) : {};
+      } catch {
+        /* count with whatever arrived */
+      }
+      this.requests.push({ body, headers: req.headers, n: this.requests.length + 1, method: req.method ?? "", url: req.url ?? "" });
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ input_tokens: 42 }));
+      return;
+    }
+    if (req.method === "GET" && (pathOnly === "/v1/models" || /^\/v1\/models\/[^/]+$/.test(pathOnly))) {
+      this.requests.push({ body: null, headers: req.headers, n: this.requests.length + 1, method: req.method ?? "", url: req.url ?? "" });
+      const all = [
+        { type: "model", id: "claude-sonnet-5-5", display_name: "Claude Sonnet 5.5" },
+        { type: "model", id: "claude-opus-5-5", display_name: "Claude Opus 5.5" },
+        { type: "model", id: "claude-haiku-5-5", display_name: "Claude Haiku 5.5" },
+      ];
+      const id = /^\/v1\/models\/(.+)$/.exec(pathOnly)?.[1];
+      if (id) {
+        const one = all.find((m) => m.id === id);
+        if (!one) {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ type: "error", error: { type: "not_found_error", message: `model: ${id}` } }));
+          return;
+        }
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(one));
+        return;
+      }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ data: all, first_id: all[0]!.id, last_id: all[all.length - 1]!.id, has_more: false }));
+      return;
+    }
     if (!req.url?.startsWith("/v1/messages")) return void res.writeHead(404).end();
 
     const body = JSON.parse(raw);
     const n = this.requests.length + 1;
-    this.requests.push({ body, headers: req.headers, n });
+    this.requests.push({ body, headers: req.headers, n, method: req.method ?? "", url: req.url ?? "" });
 
     const msgs: any[] = body.messages ?? [];
     const last = msgs[msgs.length - 1];
@@ -176,7 +215,32 @@ export class Fake {
       await sleep(reply.delayMs);
       if (closed) return;
     }
+    // non-streaming clients (the proxy surface) get the same reply as a
+    // complete Message object instead of the SSE event sequence
+    if (body.stream !== true) {
+      this.jsonMessage(res, reply, n, body.model);
+      return;
+    }
     this.sse(res, reply, n);
+  }
+
+  /** The non-streaming counterpart of sse(): one finished Message JSON. */
+  private jsonMessage(res: http.ServerResponse, reply: Exclude<Reply, { kind: "error" }>, n: number, model: unknown): void {
+    const u = reply.usage ?? { input: 100, output: 20 };
+    const content: any[] = [];
+    const text = reply.kind === "text" ? reply.text : reply.text;
+    if (text) content.push({ type: "text", text });
+    if (reply.kind === "tools") {
+      reply.calls.forEach((c, i) => content.push({ type: "tool_use", id: `toolu_${n}_${i}`, name: c.name, input: c.input }));
+    }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        id: `msg_${n}`, type: "message", role: "assistant", model: typeof model === "string" ? model : "fake",
+        content, stop_reason: reply.kind === "tools" ? "tool_use" : "end_turn", stop_sequence: null,
+        usage: { input_tokens: u.input, output_tokens: u.output },
+      }),
+    );
   }
 
   private sse(res: http.ServerResponse, reply: Exclude<Reply, { kind: "error" }>, n: number): void {
