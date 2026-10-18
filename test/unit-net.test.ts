@@ -17,6 +17,7 @@ import { ClaudeOAuth, parsePastedCode } from "../src/oauth.js";
 import { SessionStore, repairTail } from "../src/sessions.js";
 import { toApiMessages, type AgentMessage } from "../src/messages.js";
 import { runAgentTurn } from "../src/agent.js";
+import { runInContext } from "../src/context.js";
 import { runTool } from "../src/tool.js";
 import { web_fetch } from "../src/tools/web-fetch.js";
 import { htmlToText, isPrivateAddress } from "../src/tools/web-utils.js";
@@ -489,6 +490,61 @@ data: ${JSON.stringify(o)}
   const cRun = await runAgentTurn(createClaudeClient(cOauth), "m", [{ role: "user", content: "x" }], 2);
   assert(cRun.text === "nocache" && cacheStep === 2, "cache_control rejected -> retried clean");
   cacheServer.close();
+
+  // cache_control rejection is scoped to the SESSION that triggered it, not
+  // the whole process — a different session must keep sending cache_control.
+  let sessionCacheStep = 0;
+  const sessionCacheBodies: any[] = [];
+  const sessionCacheServer = http.createServer((req, res) => {
+    if (req.url === "/v1/oauth/token") {
+      res.writeHead(200).end(JSON.stringify({ access_token: "a", refresh_token: "r", expires_in: 3600, scope: "s" }));
+      return;
+    }
+    sessionCacheStep++;
+    const chunks: Buffer[] = [];
+    req.on("data", (c: Buffer) => chunks.push(c));
+    req.on("end", () => {
+      sessionCacheBodies.push(JSON.parse(Buffer.concat(chunks).toString()));
+      if (sessionCacheStep === 1) {
+        // session A's first attempt: reject cache_control
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "cache_control ttl is not supported" } }));
+        return;
+      }
+      res.writeHead(200, { "Content-Type": "text/event-stream" });
+      const w = (o: unknown) => res.write(`event: ${String((o as { type: string }).type)}\ndata: ${JSON.stringify(o)}\n\n`);
+      w({ type: "message_start", message: { id: "m", type: "message", role: "assistant", model: "x", content: [], stop_reason: null, usage: { input_tokens: 3, output_tokens: 1 } } });
+      w({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } });
+      w({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "ok" } });
+      w({ type: "content_block_stop", index: 0 });
+      w({ type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 1 } });
+      w({ type: "message_stop" });
+      res.end();
+    });
+  });
+  const sessionCachePort = await listen(sessionCacheServer);
+  process.env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${sessionCachePort}`;
+  process.env.ANTHROPIC_TOKEN_URL = `http://127.0.0.1:${sessionCachePort}/v1/oauth/token`;
+  const scOauth = new ClaudeOAuth(path.join(tmp, "session-cache-tokens.json"));
+  scOauth.importFromClaudeCode(ccFile);
+  const scClient = createClaudeClient(scOauth);
+
+  await runInContext({ cwd: ".", env: {}, todos: [], cache: "1h", sessionId: "ses-A" }, () =>
+    runAgentTurn(scClient, "m", [{ role: "user", content: "x" }], 2),
+  );
+  assert(JSON.stringify(sessionCacheBodies[0]).includes("cache_control"), "session A's rejected first attempt still included cache_control");
+  assert(!JSON.stringify(sessionCacheBodies[1]).includes("cache_control"), "session A's retry dropped it after the rejection");
+
+  await runInContext({ cwd: ".", env: {}, todos: [], cache: "1h", sessionId: "ses-A" }, () =>
+    runAgentTurn(scClient, "m", [{ role: "user", content: "x" }], 2),
+  );
+  assert(!JSON.stringify(sessionCacheBodies.at(-1)).includes("cache_control"), "session A stays off on a later, unrelated call");
+
+  await runInContext({ cwd: ".", env: {}, todos: [], cache: "1h", sessionId: "ses-B" }, () =>
+    runAgentTurn(scClient, "m", [{ role: "user", content: "x" }], 2),
+  );
+  assert(JSON.stringify(sessionCacheBodies.at(-1)).includes("cache_control"), "a DIFFERENT session is unaffected by session A's rejection");
+  sessionCacheServer.close();
 
   // effort rejection -> retried once without the field, and only for that model
   const effortBodies: any[] = [];

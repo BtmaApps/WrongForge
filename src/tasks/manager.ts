@@ -29,7 +29,7 @@ import type { Logger } from "../log.js";
 import { buildTaskPreamble, buildTaskSystemPrompt } from "../prompt.js";
 import { defaultCacheMode, isCacheMode, type CacheMode } from "../cache.js";
 import { defaultEffort, isEffortSetting, type EffortSetting } from "../effort.js";
-import { compactMessages, contextConfigFromEnv, isContextOverflow, type ContextConfig } from "../compaction.js";
+import { compactMessages, contextConfigFromEnv, isCacheOrderingError, isContextOverflow, type ContextConfig } from "../compaction.js";
 import type { LoadedSession } from "../sessions.js";
 import { agentTools } from "../tools/index.js";
 import {
@@ -609,8 +609,28 @@ export class TaskManager {
     this.saveNow(rec);
     const startedAt = Date.now();
 
+    // Loaded before live.ctx (and before it used to be loaded, further
+    // down) because a session's prompt-cache mode is locked in by its first
+    // turn: Anthropic requires a consistent TTL ordering across the whole
+    // cached prefix, and cache.ts only ever marks the NEWEST message — it
+    // never touches an older cache_control already embedded in history. A
+    // later turn using a different `cache` mode than an earlier one on the
+    // same session would put an inconsistent TTL in front of that history,
+    // which the API rejects outright. A per-task `cache` override therefore
+    // only has effect on the turn that creates the session (sessions.ts's
+    // `cache_mode` field, set once in appendTurn and never overwritten).
+    let session = o.sessions.load(rec.session_id);
+    const effectiveCache: CacheMode = session?.meta.cache_mode ?? rec.cache;
+    if (effectiveCache !== rec.cache) {
+      o.logger.warn("session.cache_mode_locked", { task_id: id, session_id: rec.session_id, requested: rec.cache, locked: effectiveCache });
+      this.emit(id, "session.cache_mode_locked", { requested: rec.cache, locked: effectiveCache });
+      rec.cache = effectiveCache; // reflects what is actually used, e.g. in GET /v1/tasks/:id
+      this.saveNow(rec);
+    }
+
     live.ctx = {
       taskId: id,
+      sessionId: rec.session_id,
       cwd: rec.workdir,
       env: live.env,
       todos: [],
@@ -644,7 +664,6 @@ export class TaskManager {
       clearTimeout(live.timeout);
     };
 
-    let session = o.sessions.load(rec.session_id);
     this.emit(id, "task.started", {
       model: rec.model, workdir: rec.workdir, session_id: rec.session_id, session_created: rec.session_created,
       // set when this session last worked somewhere else (paths in its history may not apply)
@@ -750,7 +769,7 @@ export class TaskManager {
     // with it the cached prefix of the session) stays identical across tasks.
     const userMessage = `${buildTaskPreamble({ taskId: id, cwd: rec.workdir })}\n\n${rec.prompt}`;
     const system = buildTaskSystemPrompt({ systemAppend: rec.system_append, promptDir: o.promptDir });
-    const guard = { clearAt: cfg.clearAt, keepToolResults: cfg.keepToolResults };
+    const guard = { clearAt: cfg.clearAt, keepToolResults: cfg.keepToolResults, maxToolResultChars: cfg.maxToolResultChars };
 
     let history: AgentMessage[] = [];
     let mark = 0;
@@ -775,9 +794,14 @@ export class TaskManager {
 
       // the stream's own error (the API's words) is more specific than the SDK's generic "no output" error
       const failedText = `${live.lastError ?? ""} ${(thrown as Error)?.message ?? ""}`;
-      const overflow = (thrown || turn?.finishReason === "error") && isContextOverflow(failedText);
+      // Both are fixed by the same compaction: context overflow summarizes
+      // away the bulk of the history; a cache-ordering error (an earlier
+      // turn's cache_control TTL now sorts "after" a newer one, see
+      // compaction.ts's isCacheOrderingError) is fixed too because the
+      // offending older messages get summarized away rather than re-sent.
+      const recoverableByCompaction = (thrown || turn?.finishReason === "error") && (isContextOverflow(failedText) || isCacheOrderingError(failedText));
       // only safe to redo when nothing has been executed yet (no side effects)
-      if (overflow && !retried && rec.progress.tool_calls === 0 && session && session.messages.length > 0) {
+      if (recoverableByCompaction && !retried && rec.progress.tool_calls === 0 && session && session.messages.length > 0) {
         retried = true;
         try {
           const compacted = await this.compactIfNeeded(id, session, true);
@@ -796,6 +820,25 @@ export class TaskManager {
     this.flushText(id);
     const durationMs = Date.now() - startedAt;
 
+    // Builds the same TaskResult shape (context_tokens/window/percent and
+    // everything else) regardless of outcome. Used on failure paths too
+    // (context_overflow, cache_ordering_error) whenever `turn` is available —
+    // agent.ts keeps context_tokens current (including the estimate from a
+    // just-appended tool result) even when a turn ends in error, so a caller
+    // can tell HOW CLOSE it got, not just that it failed. Only absent when
+    // `turn` itself never came back (a rarer failure before any turn ran).
+    const buildResult = (t: TurnResult): TaskResult => ({
+      text: t.text,
+      finish_reason: t.finishReason,
+      steps: t.steps,
+      tool_calls: t.toolCalls,
+      usage: t.usage,
+      context_tokens: t.context_tokens,
+      context_window: cfg.window,
+      context_percent: Math.round((t.context_tokens / cfg.window) * 1000) / 10,
+      duration_ms: durationMs,
+    });
+
     // ---- classify the outcome
     if (live.abort.signal.aborted || turn?.finishReason === "aborted") {
       if (live.interrupted) {
@@ -808,26 +851,30 @@ export class TaskManager {
       if (isContextOverflow(msg)) {
         o.sessions.patchMeta(rec.session_id, { needs_compaction: true });
         return this.finalize(id, "failed", {
+          ...(turn ? { result: buildResult(turn) } : {}),
           error: {
             code: "context_overflow",
             message: `the conversation does not fit the model's context window (${msg.slice(0, 300)}). The session is marked for compaction: send the task again with the same session_id, or start a new session.`,
           },
         });
       }
-      return this.finalize(id, "failed", { error: { code: "agent_error", message: msg } });
+      if (isCacheOrderingError(msg)) {
+        // Same recovery as context_overflow: the next task on this session
+        // compacts first (compactIfNeeded's "flagged_after_overflow" reason),
+        // which drops the older messages carrying the inconsistent TTL.
+        o.sessions.patchMeta(rec.session_id, { needs_compaction: true });
+        return this.finalize(id, "failed", {
+          ...(turn ? { result: buildResult(turn) } : {}),
+          error: {
+            code: "cache_ordering_error",
+            message: `the session's cached prefix has an inconsistent cache TTL ordering (${msg.slice(0, 300)}). The session is marked for compaction: send the task again with the same session_id, or start a new session.`,
+          },
+        });
+      }
+      return this.finalize(id, "failed", { ...(turn ? { result: buildResult(turn) } : {}), error: { code: "agent_error", message: msg } });
     }
 
-    const result: TaskResult = {
-      text: turn.text,
-      finish_reason: turn.finishReason,
-      steps: turn.steps,
-      tool_calls: turn.toolCalls,
-      usage: turn.usage,
-      context_tokens: turn.context_tokens,
-      context_window: cfg.window,
-      context_percent: Math.round((turn.context_tokens / cfg.window) * 1000) / 10,
-      duration_ms: durationMs,
-    };
+    const result: TaskResult = buildResult(turn);
 
     // finishReason comes from the Anthropic API (agent.ts): end_turn /
     // stop_sequence = done, tool_use = the step budget ran out while the
@@ -836,7 +883,7 @@ export class TaskManager {
     if (commitable) {
       try {
         o.sessions.appendTurn(rec.session_id, history.slice(mark), {
-          task_id: id, model: rec.model, prompt: rec.prompt, workdir: rec.workdir, context_tokens: turn.context_tokens,
+          task_id: id, model: rec.model, prompt: rec.prompt, workdir: rec.workdir, context_tokens: turn.context_tokens, cache_mode: rec.cache,
         });
       } catch (e) {
         return this.finalize(id, "failed", {

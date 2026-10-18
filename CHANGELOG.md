@@ -6,6 +6,70 @@ package.json and the git tags that drive the release workflow.
 
 ## [Unreleased]
 
+## [0.4.7] — 2026-10-18
+
+### Added
+- **`wrongforge refresh`** (`npm run refresh`): a lightweight, serve-independent
+  way to use the refresh token on demand. `serve`'s own idle keep-alive only
+  runs while the server is up; reverse-engineering Claude Code found that the
+  refresh token itself dies after roughly 30 days of disuse (renewed on every
+  successful refresh — `re/notes/findings.md` §14). Running this on a shorter
+  schedule (cron, systemd timer, Windows Task Scheduler) keeps a long-idle
+  session alive without ever running real Claude Code. Deliberately not a
+  bare token-endpoint call: carved CC never refreshes in isolation either
+  (every refresh site found guards a real request and fires right before
+  one), so this follows the refresh with the same `GET /v1/models`
+  `wrongforge models` already makes — keeping the traffic inside a shape
+  real CC also produces, and confirming the token actually works.
+- `oauth.status()` now reports `refreshTokenExpiresAt` (null when the token
+  endpoint hasn't sent it — not "never expires") alongside the access token's
+  expiry.
+
+### Fixed
+- `src/oauth.ts` now records `refresh_token_expires_in` from the token
+  endpoint when present, carrying the previous value forward on a refresh
+  response that omits it (mirrors Claude Code's own merge behavior) instead
+  of discarding it.
+- **`context_overflow` from a single oversized tool result** (reported via
+  WrongStack): a tool result could push a request past the model's context
+  window (up to a hard `400`) without the in-task guard ever reacting, because
+  it only checks the API's own usage numbers from the *previous* response —
+  which don't yet include a result just appended, and arrive one request too
+  late for a result that alone jumps past the limit. Also, nothing bounded
+  the size of a tool result generically: built-in tools already self-limit
+  their own output, but MCP/gateway tools did not. Fixed with two new
+  defenses (`src/compaction.ts`, `src/agent.ts`): (1) any single tool result
+  bigger than `WRONGFORGE_MAX_TOOL_OUTPUT_CHARS` (default 400 000 chars) is
+  clipped the moment it comes back, regardless of which tool produced it; (2)
+  the in-task guard now also re-checks right after a tool result is
+  appended, using a same-turn character-count estimate of that result (the
+  real usage numbers still win on the next response — the estimate only
+  decides *when* the guard reacts).
+- **Cache-control TTL ordering error** (`a ttl='1h' cache_control block must
+  not come after a ttl='5m' cache_control block`, reported via WrongStack on
+  a long-running session): a task could pick its own prompt-cache mode
+  (`5m`/`1h`/`off`) independent of what earlier tasks on the same
+  `session_id` had used — and since `cache.ts` only ever marks the newest
+  message (never touching an older `cache_control` already embedded in
+  history), mixing modes across a session's turns could leave an
+  inconsistent TTL ordering the API rejects outright, with no way for the
+  session to recover on its own. Fixed: a session's cache mode is now locked
+  in by its **first** turn (`SessionMeta.cache_mode`) — every later task's
+  `cache` request is silently overridden to match (logged as
+  `session.cache_mode_locked`); and the rare case where this error still
+  occurs is now recognized (`isCacheOrderingError`) and recovered from
+  exactly like `context_overflow` — the session is flagged and compacts
+  automatically on the next task (new `cache_ordering_error` error code).
+  Also, the cache-rejection fallback (disabling `cache_control` after the
+  API refuses it) is now scoped **per session** instead of process-wide — a
+  single broken session no longer silently turns off caching for every
+  other session the server is also handling.
+- **A failed task reported no `result` at all on `context_overflow` and
+  `cache_ordering_error`** — a caller got the error message but never
+  `context_tokens`/`context_window`/`context_percent`, so there was no way
+  to tell how close it got (only that it failed). Both now include `result`
+  whenever a turn actually ran, same as every other failure mode.
+
 ## [0.4.6] — 2026-10-18
 
 ### Added

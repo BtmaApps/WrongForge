@@ -3,6 +3,7 @@
  *
  *   npm run login            # browser + paste-the-code flow
  *   npm run status           # session status
+ *   wrongforge refresh       # use the refresh token now (serve-independent — see below)
  *   npm run url              # just print an authorize URL
  *   npm run models           # live model list (requires login)
  *   npm start                # chat REPL
@@ -121,6 +122,45 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
 
   if (cmd === "status") {
     console.log(JSON.stringify(oauth.status(), null, 2));
+    return;
+  }
+
+  // `wrongforge refresh`: a lightweight, serve-independent way to use the
+  // refresh token on purpose. The access-token keep-alive in src/server.ts
+  // (WRONGFORGE_TOKEN_KEEPALIVE_MS) only runs while `serve` is up — if it
+  // isn't (closed laptop, a dev box, a deployment that starts it on demand),
+  // nothing touches the refresh token, and the token endpoint expires it
+  // after ~30 days of disuse (carved from CC 2.1.300, mod-0150 `jPr()`; see
+  // re/notes/findings.md). Run this on a schedule shorter than that (cron,
+  // systemd timer, Windows Task Scheduler — see README "Configuration") to
+  // keep a long-idle session alive without ever running real Claude Code.
+  //
+  // Deliberately NOT a bare token-endpoint call: carved CC itself never
+  // refreshes in isolation — every refresh site found (mod-0150's token
+  // helper, mod-0666/0679's bootstrap path) is a guard in front of a real
+  // request, firing only when one is about to be made, immediately followed
+  // by that request. A lone refresh with no request after it — the one
+  // thing a 30-day-idle session would otherwise never do — is a shape real
+  // CC doesn't produce; following it with the same lightweight GET /v1/models
+  // `wrongforge models` already makes keeps this refresh inside a shape CC's
+  // own traffic does produce, and incidentally confirms the token actually
+  // works (not just that the endpoint accepted it).
+  if (cmd === "refresh") {
+    if (!oauth.signedIn) {
+      console.error("not signed in — run `wrongforge login` (or `import`) first");
+      process.exit(1);
+    }
+    const t = await oauth.refresh();
+    if (!t) {
+      console.error(`refresh failed — run \`wrongforge login\` (or \`import\`) again`);
+      process.exit(1);
+    }
+    const models = await fetchModelList(oauth); // getAccessToken() here reuses the token just refreshed above
+    if (!models.ok) {
+      console.error(`refreshed, but the follow-up model-list check failed (${models.error}) — the session may not be fully usable`);
+      process.exit(1);
+    }
+    console.log(`refreshed; access token valid until ${new Date(t.expiresAt).toISOString()} (${models.models.length} models reachable)`);
     return;
   }
 

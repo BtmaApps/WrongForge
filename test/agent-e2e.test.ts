@@ -254,7 +254,110 @@ function main(): Promise<void> {
   });
 }
 
-main().catch((e) => {
-  console.error(e);
-  process.exit(1);
-});
+/**
+ * A single oversized tool result must not reach the model untouched: the
+ * per-result cap (ContextGuard.maxToolResultChars) clips it right after
+ * runTool returns, before it is ever pushed to history — see
+ * compaction.ts's file header, defense #1 (re/notes/findings.md §context
+ * overflow investigation). Isolated server/session so it doesn't share
+ * state with main()'s.
+ */
+function testOversizedToolResultIsCapped(): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const messagesRequests: { body: any }[] = [];
+
+    function bigToolUseResponse(res: http.ServerResponse): void {
+      const msg = {
+        id: "msg_big_tool", type: "message", role: "assistant", model: DEFAULT_MODEL,
+        content: [], stop_reason: null, usage: { input_tokens: 10, output_tokens: 1 },
+      };
+      sse(res, { type: "message_start", message: msg });
+      sse(res, { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "toolu_big", name: "big_tool", input: {} } });
+      sse(res, { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: "{}" } });
+      sse(res, { type: "content_block_stop", index: 0 });
+      sse(res, { type: "message_delta", delta: { stop_reason: "tool_use" }, usage: { output_tokens: 5 } });
+      sse(res, { type: "message_stop" });
+      res.end();
+    }
+
+    const server = http.createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (c: Buffer) => chunks.push(c));
+      req.on("end", () => {
+        const bodyText = Buffer.concat(chunks).toString("utf8");
+        if (req.url === "/v1/oauth/token") {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ access_token: "at-cap", refresh_token: "rt-cap", expires_in: 3600, scope: "user:inference user:profile" }));
+          return;
+        }
+        if (req.url?.startsWith("/v1/messages")) {
+          messagesRequests.push({ body: JSON.parse(bodyText) });
+          res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" });
+          if (messagesRequests.length === 1) bigToolUseResponse(res);
+          else textResponse(res);
+          return;
+        }
+        res.writeHead(404).end();
+      });
+    });
+
+    server.listen(0, "127.0.0.1", async () => {
+      try {
+        const addr = server.address();
+        const port = typeof addr === "object" && addr ? addr.port : 0;
+        const base = `http://127.0.0.1:${port}`;
+        process.env.ANTHROPIC_TOKEN_URL = `${base}/v1/oauth/token`;
+        process.env.ANTHROPIC_BASE_URL = `${base}/v1`;
+        process.env.CLAUDE_OAUTH_CLIENT_ID = "test-client-id";
+
+        const tmp2 = fs.mkdtempSync(path.join(os.tmpdir(), "wrongforge-e2e-cap-"));
+        process.on("exit", () => fs.rmSync(tmp2, { recursive: true, force: true }));
+        const oauth = new ClaudeOAuth(path.join(tmp2, "tokens.json"));
+        await oauth.exchangeCode("code-cap", "verifier-cap", "https://console.anthropic.com/oauth/code/callback", "user:inference user:profile");
+        const provider = createClaudeClient(oauth);
+
+        const ORIGINAL_CHARS = 50_000;
+        const bigTool = dynamicTool({
+          description: "returns an oversized result on purpose",
+          inputSchema: {},
+          execute: async () => "y".repeat(ORIGINAL_CHARS),
+        });
+
+        const events: { type: string; original_chars?: number }[] = [];
+        const history: AgentMessage[] = [{ role: "user", content: "call the big tool" }];
+        const result = await runAgentTurn(
+          provider, DEFAULT_MODEL, history, undefined, undefined,
+          (e) => events.push(e as { type: string; original_chars?: number }),
+          undefined,
+          { clearAt: 1_000_000, keepToolResults: 8, maxToolResultChars: 1_000 },
+          { big_tool: bigTool },
+        );
+
+        const assert = (cond: boolean, label: string) => {
+          if (!cond) throw new Error(`assertion failed: ${label}`);
+        };
+        assert(messagesRequests.length === 2, "two LLM steps (big tool + final)");
+        const sentToolResult = JSON.stringify(messagesRequests[1].body.messages);
+        assert(!sentToolResult.includes("y".repeat(ORIGINAL_CHARS)), "the oversized result was NOT sent verbatim");
+        assert(sentToolResult.length < ORIGINAL_CHARS, "the request body is far smaller than the original result");
+        const truncatedEvent = events.find((e) => e.type === "tool_output_truncated");
+        assert(truncatedEvent?.original_chars === ORIGINAL_CHARS, "a tool_output_truncated event reports the real original size");
+        assert(result.finishReason === "end_turn", "the turn still completes normally after the cap");
+
+        server.close();
+        console.log("AGENT E2E (TOOL OUTPUT CAP) PASSED ✓ (oversized result clipped before reaching the model)");
+        resolve();
+      } catch (e) {
+        server.close();
+        reject(e);
+      }
+    });
+  });
+}
+
+main()
+  .then(testOversizedToolResultIsCapped)
+  .catch((e) => {
+    console.error(e);
+    process.exit(1);
+  });

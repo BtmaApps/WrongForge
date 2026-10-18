@@ -140,6 +140,7 @@ From source:
 npm run import            # reuse your existing Claude Code session (no login needed)
 npm run login             # alternative: browser login -> paste the shown code
 npm run status            # token status (expiry/scope; tokens are never printed)
+npm run refresh           # use the refresh token now, without starting serve
 npm run models            # live model list for your account
 npm start                 # chat REPL
 npm run serve             # HTTP task API (port 8787)
@@ -194,6 +195,32 @@ adopts Claude Code's current session (file or Keychain) automatically;
 an idle keep-alive refreshes the session on its own (see
 `WRONGFORGE_TOKEN_KEEPALIVE_MS`) — no need to open Claude Code periodically
 just to keep the tokens alive.
+
+**Keeping a session alive without `serve` running:** the refresh token itself
+expires after prolonged disuse (reverse-engineered from Claude Code: on the
+order of 30 days, renewed on every successful refresh — see
+`re/notes/findings.md` for anyone building from a full checkout). The idle
+keep-alive above only runs while `serve` is up; if it is not — a closed
+laptop, a box that starts WrongForge on demand — nothing touches the refresh
+token in the meantime. Run `wrongforge refresh` (or `npm run refresh`) on a
+schedule shorter than that window to keep a long-idle session alive, with no
+real Claude Code involved: it performs the same refresh-token exchange
+`serve`'s own keep-alive already does, immediately followed by the same
+`GET /v1/models` `wrongforge models` makes — real Claude Code never refreshes
+in isolation either (every refresh site found while reverse-engineering it
+guards a real request and fires right before one), so this keeps the traffic
+inside a shape real CC also produces, and incidentally confirms the token
+actually works rather than just that the endpoint accepted it:
+
+```bash
+# cron, weekly
+0 3 * * 0 /path/to/wrongforge refresh >> ~/.wrongforge/logs/refresh.log 2>&1
+```
+
+```powershell
+# Windows Task Scheduler, weekly
+schtasks /Create /SC WEEKLY /TN "WrongForge token refresh" /TR "wrongforge.exe refresh"
+```
 
 > Loopback redirects (`http://127.0.0.1:…/callback`) are **not supported** for
 > this client: the server rejects them. The only registered redirect is
@@ -479,18 +506,47 @@ touches what the real client actually exchanged.
 A session (`session_id`) keeps the conversation across tasks; it is persisted
 under `~/.wrongforge/sessions/`. A long history is kept under control by:
 
-1. **In-task guard** — once the live context passes `WRONGFORGE_CLEAR_AT`
+1. **Per-result cap** — any single tool result bigger than
+   `WRONGFORGE_MAX_TOOL_OUTPUT_CHARS` (default 400 000 chars, ~100K tokens) is
+   clipped (middle cut, both ends kept) the moment it comes back, before it
+   ever reaches the conversation — regardless of which tool produced it.
+   Built-in tools already bound their own output (tens of thousands of
+   chars); this is the backstop for MCP/gateway tools that don't, and for
+   anything that slips through. Without it, one oversized result can push a
+   request straight past the model's context window — the in-task guard
+   below only reacts to the API's own usage numbers, which arrive one
+   request too late to catch that.
+2. **In-task guard** — once the live context passes `WRONGFORGE_CLEAR_AT`
    tokens (default 600 000), old tool outputs are replaced by a placeholder; the
-   most recent `WRONGFORGE_KEEP_TOOL_RESULTS` (8) are kept.
-2. **Between tasks** — a session whose context exceeds `WRONGFORGE_COMPACT_AT`
+   most recent `WRONGFORGE_KEEP_TOOL_RESULTS` (8) are kept. Checked both
+   before every model call and right after a tool result is appended (using
+   a same-turn size estimate of that result, so a single large result can't
+   silently slip past the threshold before the next request).
+3. **Between tasks** — a session whose context exceeds `WRONGFORGE_COMPACT_AT`
    (default 150 000) is summarized by the model; the last
    `WRONGFORGE_COMPACT_KEEP_TURNS` (2) turns stay verbatim and the originals are
    archived. Also available as `POST /v1/sessions/:id/compact`.
 
+If a task still fails with `context_overflow` (the model rejected a prompt
+that didn't fit even with all three defenses active), the session is flagged
+and the *next* task on the same `session_id` compacts it automatically before
+running.
+
 **Prompt caching:** `cache_control` breakpoints are set on the last system block
 and the last message, so every request reads what the previous one wrote.
-Modes per task: `5m`, `1h` (default, `WRONGFORGE_CACHE`) or `off`. If the API
-rejects `cache_control`, caching switches itself off for the process.
+Modes per task: `5m`, `1h` (default, `WRONGFORGE_CACHE`) or `off` — but only
+on the turn that **creates** the session: Anthropic requires a consistent TTL
+ordering across the whole cached prefix, and a later turn only ever marks the
+newest message (older `cache_control` blocks already in history are never
+touched), so a session's cache mode is **locked in by its first turn** and
+every later task's `cache` request is silently overridden to match (a
+`session.cache_mode_locked` event/log line notes it when that happens). If the
+API still rejects `cache_control` (e.g. it's unsupported on the account) or
+a session somehow ends up with an inconsistent TTL ordering anyway
+(`cache_ordering_error`, recovered exactly like `context_overflow` — the
+session is flagged and compacts on the next task), caching switches off for
+*that session* — not the whole process, so one broken session never silently
+disables caching for every other session this server is also handling.
 `/v1/messages` retries once on `401` (after a token refresh); the SDK retries
 transient errors twice.
 
@@ -578,7 +634,7 @@ Environment variables (all optional unless noted):
 | `WRONGFORGE_CACHE` | Default cache mode `5m\|1h\|off` (1h) |
 | `WRONGFORGE_EFFORT` | Default reasoning effort `low\|medium\|high\|off` (high), clamped to model support |
 | `WRONGFORGE_LIVE` | Serve-console live view: every HTTP request and task event as a colored line on stdout. Auto in a terminal, `1` forces on (pipes/logs), `0` off |
-| `WRONGFORGE_CONTEXT_WINDOW`, `_COMPACT_AT`, `_CLEAR_AT`, `_COMPACT_KEEP_TURNS`, `_KEEP_TOOL_RESULTS`, `_SUMMARY_MODEL` | Context management (see above) |
+| `WRONGFORGE_CONTEXT_WINDOW`, `_COMPACT_AT`, `_CLEAR_AT`, `_COMPACT_KEEP_TURNS`, `_KEEP_TOOL_RESULTS`, `_MAX_TOOL_OUTPUT_CHARS`, `_SUMMARY_MODEL` | Context management (see [Sessions & context management](#sessions--context-management)) |
 | `WRONGFORGE_PROMPT_DIR` | Guide directory (default `<repo>/prompts`) |
 | `WRONGFORGE_MCP_CONFIG`, `_MCP_IDLE_MS`, `_MCP_TOOLS_TTL_MS`, `_MCP_AGENT_MANAGE` | MCP config path, pool idle time, tool-list TTL, allow the agent to add/remove servers (1) |
 | `WRONGFORGE_GATEWAY_ALLOWED_HOSTS`, `_GATEWAY_DISCOVERY_TTL_MS` | Non-loopback gateway hosts; discovery cache (30 s) |

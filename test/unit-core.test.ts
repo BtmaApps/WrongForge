@@ -17,9 +17,12 @@ import {
   clearOldToolOutputs,
   compactMessages,
   contextConfigFromEnv,
+  estimateTokens,
+  isCacheOrderingError,
   isContextOverflow,
   renderTranscript,
   splitTurns,
+  truncateToolOutput,
   CLEARED_PLACEHOLDER,
 } from "../src/compaction.js";
 import { applyCacheBreakpoints } from "../src/cache.js";
@@ -118,10 +121,47 @@ async function main(): Promise<void> {
     WRONGFORGE_CLEAR_AT: "bad",
     WRONGFORGE_COMPACT_KEEP_TURNS: "0",
     WRONGFORGE_KEEP_TOOL_RESULTS: "3",
+    WRONGFORGE_MAX_TOOL_OUTPUT_CHARS: "500",
     WRONGFORGE_SUMMARY_MODEL: "x",
   });
-  assert(cfg.window === 2000 && cfg.compactAt === 0 && cfg.clearAt === 600_000 && cfg.keepTurns === 1, "contextConfigFromEnv clamps");
+  assert(cfg.window === 2000 && cfg.compactAt === 0 && cfg.clearAt === 600_000 && cfg.keepTurns === 1 && cfg.maxToolResultChars === 500, "contextConfigFromEnv clamps");
+  assert(contextConfigFromEnv({}).maxToolResultChars === 400_000, "contextConfigFromEnv: maxToolResultChars default");
   assert(isContextOverflow("prompt is too long") && !isContextOverflow("nope"), "isContextOverflow");
+  assert(
+    isCacheOrderingError("a ttl='1h' cache_control block must not come after a ttl='5m' cache_control block.") && !isCacheOrderingError("nope"),
+    "isCacheOrderingError",
+  );
+
+  // ------------------------------------------------- session cache_mode lock
+  {
+    const csessions = new SessionStore(path.join(tmp, "cache-mode-sessions"));
+    csessions.create("ses-lock");
+    csessions.appendTurn("ses-lock", [], { task_id: "t1", model: "m", prompt: "p", cache_mode: "1h" });
+    assert(csessions.meta("ses-lock")?.cache_mode === "1h", "appendTurn records cache_mode on the first turn");
+    csessions.appendTurn("ses-lock", [], { task_id: "t2", model: "m", prompt: "p", cache_mode: "5m" });
+    assert(csessions.meta("ses-lock")?.cache_mode === "1h", "a later turn's cache_mode never overwrites the locked value");
+    const cunset = new SessionStore(path.join(tmp, "cache-mode-sessions-2"));
+    cunset.create("ses-nomode");
+    cunset.appendTurn("ses-nomode", [], { task_id: "t1", model: "m", prompt: "p" });
+    assert(cunset.meta("ses-nomode")?.cache_mode === undefined, "appendTurn without cache_mode leaves it unset");
+  }
+
+  // ------------------------------------------------- per-result output cap
+  const small = truncateToolOutput("short", 1000);
+  assert(!small.truncated && small.output === "short" && small.originalChars === 5, "truncateToolOutput: under the limit passes through unchanged");
+  const bigString = "x".repeat(10_000);
+  const clippedString = truncateToolOutput(bigString, 1000);
+  assert(clippedString.truncated && clippedString.originalChars === 10_000, "truncateToolOutput: over-limit string is truncated, original size reported");
+  assert(
+    typeof clippedString.output === "string" && (clippedString.output as string).length < 10_000 && (clippedString.output as string).includes("chars omitted"),
+    "truncateToolOutput: clipped output is shorter and notes what happened",
+  );
+  const bigObject = { data: "y".repeat(10_000) };
+  const clippedObject = truncateToolOutput(bigObject, 1000);
+  assert(clippedObject.truncated && typeof clippedObject.output === "string", "truncateToolOutput: a non-string result is serialized before clipping");
+  assert(truncateToolOutput(bigString, 0).truncated === false, "truncateToolOutput: maxChars<=0 disables truncation");
+  assert(truncateToolOutput(bigString, 0).originalChars === 10_000, "truncateToolOutput: originalChars is still reported when disabled");
+  assert(estimateTokens(400) === 100 && estimateTokens(1) === 1 && estimateTokens(0) === 0, "estimateTokens: chars/4 rounded up");
 
   // ======================================================== cache breakpoints
   const bodyStr = { system: [{ type: "text", text: "s" }], messages: [{ role: "user", content: "hi" }] };

@@ -75,6 +75,15 @@ export interface StoredToken {
   /** Unix ms — Date.now() + expires_in * 1000 */
   expiresAt: number;
   scope: string;
+  /**
+   * Unix ms the REFRESH token itself dies (not the access token above) —
+   * Date.now() + refresh_token_expires_in * 1000, when the token endpoint
+   * sends that field (carved from CC 2.1.300's own token-response handling,
+   * mod-0150 `jPr()`: ~30 days, renewed on every successful refresh). Absent
+   * when the endpoint didn't send it — older stored tokens predate this field
+   * too — in which case it is treated as unknown, not expired.
+   */
+  refreshTokenExpiresAt?: number;
 }
 
 class TokenStore {
@@ -289,6 +298,11 @@ export class ClaudeOAuth {
       signedIn: this.signedIn,
       clientConfigured: cfg !== null,
       accessTokenExpiresAt: this.token?.expiresAt ?? null,
+      /** null = unknown (the endpoint hasn't told us) — not "never expires".
+       *  See the refresh-token-expiry note on StoredToken; `wrongforge
+       *  refresh` run periodically (e.g. weekly, outside `serve`) keeps this
+       *  far from its actual deadline. */
+      refreshTokenExpiresAt: this.token?.refreshTokenExpiresAt ?? null,
       scope: this.token?.scope ?? cfg?.scope ?? null,
       tokenUrl: cfg?.tokenUrl ?? null,
     };
@@ -521,11 +535,22 @@ export class ClaudeOAuth {
       typeof body.refresh_token === "string" && body.refresh_token
         ? body.refresh_token
         : this.token?.refreshToken ?? "";
+    // The endpoint doesn't always send refresh_token_expires_in (e.g. a
+    // concurrent-refresh race may return a thin body) — carry the previous
+    // value forward rather than treat a silent field as "the refresh token
+    // is now immortal" (mirrors CC's own yE(): n.refreshTokenExpiresAt ??
+    // e?.refreshTokenExpiresAt).
+    const rawRefreshExpiresIn = body.refresh_token_expires_in;
+    const refreshTokenExpiresAt =
+      typeof rawRefreshExpiresIn === "number" && Number.isFinite(rawRefreshExpiresIn) && rawRefreshExpiresIn > 0
+        ? Date.now() + rawRefreshExpiresIn * 1000
+        : this.token?.refreshTokenExpiresAt;
     const t: StoredToken = {
       accessToken: body.access_token,
       refreshToken,
       expiresAt: Date.now() + expiresIn * 1000,
       scope: typeof body.scope === "string" && body.scope ? body.scope : scope,
+      ...(refreshTokenExpiresAt !== undefined && { refreshTokenExpiresAt }),
     };
     this.token = t;
     this.tokenGeneration++;

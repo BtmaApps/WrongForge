@@ -13,6 +13,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { AgentMessage } from "./messages.js";
+import type { CacheMode } from "./cache.js";
 import { gzipFile } from "./log.js";
 
 const DAY_MS = 86_400_000;
@@ -45,6 +46,17 @@ export interface SessionMeta {
   last_compaction_at?: string;
   /** Set when a request failed because the context was too large; the next task compacts first. */
   needs_compaction?: boolean;
+  /**
+   * Prompt-cache mode locked in by this session's first turn. Anthropic
+   * requires a consistent TTL ordering across the whole cached prefix — a
+   * later turn's cache_control TTL must never sort "after" an earlier one
+   * still embedded in history (cache.ts only ever marks the newest message,
+   * it never touches older blocks). A per-task `cache` override therefore
+   * only has effect on the turn that creates the session; every later turn
+   * uses this locked value regardless of what it asks for. Undefined for
+   * sessions created before this field existed.
+   */
+  cache_mode?: CacheMode;
   /** Last task that ran in this session. */
   last_task_id?: string;
   /** Most recent task ids (capped). */
@@ -113,7 +125,7 @@ export class SessionStore {
   appendTurn(
     id: string,
     newMessages: AgentMessage[],
-    info: { task_id: string; model: string; prompt: string; workdir?: string; context_tokens?: number },
+    info: { task_id: string; model: string; prompt: string; workdir?: string; context_tokens?: number; cache_mode?: CacheMode },
     now = new Date(),
   ): SessionMeta {
     const meta = this.readMeta(id);
@@ -130,6 +142,9 @@ export class SessionStore {
     meta.model = info.model;
     if (info.workdir) meta.workdir = info.workdir;
     if (info.context_tokens) meta.context_tokens = info.context_tokens;
+    // Locked by the first turn only — never overwritten afterward (see the
+    // field's doc comment on SessionMeta for why a later turn can't change it).
+    meta.cache_mode ??= info.cache_mode;
     meta.needs_compaction = undefined; // a turn that fit proves the context is fine again
     meta.last_task_id = info.task_id;
     meta.task_ids = [...meta.task_ids, info.task_id].slice(-MAX_TASK_IDS);

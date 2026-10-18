@@ -28,6 +28,10 @@ export interface ProgressReport {
 
 export interface TaskContext {
   taskId?: string;
+  /** This task's session, when it has one — lets provider.ts scope
+   *  session-specific state (e.g. the cache-rejection flag) instead of
+   *  applying it process-wide. */
+  sessionId?: string;
   /** Working directory of this task (absolute). */
   cwd: string;
   /** Extra environment variables merged into every shell command. */

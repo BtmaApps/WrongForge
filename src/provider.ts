@@ -236,14 +236,23 @@ const CC_AGENT_IDENTITY_BLOCK =
   "You are a Claude agent, built on Anthropic's Claude Agent SDK.";
 
 /**
- * Set when the API rejected cache_control once: caching is then switched off
- * for the rest of the process so a cache problem can never fail tasks.
+ * Sessions whose cache_control was rejected once: caching is then switched
+ * off for the REST OF THAT SESSION so a cache problem can never fail its
+ * tasks again. Scoped per session, not process-wide — a single session with
+ * a pre-existing problem (e.g. an inconsistent TTL ordering baked into its
+ * history before this was fixed) must not silently disable caching for
+ * every other session this process is also serving. Sessionless callers
+ * (the REPL/chat path has no session_id) fall back to the one process-wide
+ * flag below, matching the previous behavior there.
  */
-let cacheRejected = false;
+const cacheRejectedSessions = new Set<string>();
+let cacheRejectedGlobal = false;
 
 /** Cache mode for the request being built: task override > env default; "off" after a rejection. */
 function effectiveCacheMode(): CacheMode {
-  if (cacheRejected) return "off";
+  const sessionId = currentContext()?.sessionId;
+  const rejected = sessionId ? cacheRejectedSessions.has(sessionId) : cacheRejectedGlobal;
+  if (rejected) return "off";
   return currentContext()?.cache ?? defaultCacheMode();
 }
 
@@ -475,8 +484,10 @@ export function oauthFetch(oauth: ClaudeOAuth): typeof globalThis.fetch {
     if (res.status === 400 && effectiveCacheMode() !== "off") {
       const detail = await res.clone().text().catch(() => "");
       if (/cache_control|cache control|ttl/i.test(TTL_BETA_NAMES.reduce((t, b) => t.split(b).join(""), detail))) {
-        cacheRejected = true;
-        console.error("[cache] the API rejected cache_control — prompt caching is disabled for this process:", detail.slice(0, 300));
+        const sessionId = currentContext()?.sessionId;
+        if (sessionId) cacheRejectedSessions.add(sessionId);
+        else cacheRejectedGlobal = true;
+        console.error(`[cache] the API rejected cache_control — prompt caching is disabled for ${sessionId ? `session ${sessionId}` : "this process"}:`, detail.slice(0, 300));
         res = await doFetch();
       }
     }

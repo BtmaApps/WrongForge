@@ -331,6 +331,56 @@ data: ${JSON.stringify(o)}
   });
   assert(r_envmodel.out.includes("claude-opus-5-5"), "repl: CLAUDE_MODEL env");
 
+  // ======================================================== refresh
+  // `wrongforge refresh`: a lightweight, serve-independent way to use the
+  // refresh token — not signed in -> exit 1; signed in -> exercises the
+  // real refresh() flow, followed by the same GET /v1/models `wrongforge
+  // models` makes (so a lone refresh never leaves the shape CC's own
+  // traffic produces — see the comment on the command in src/main.ts),
+  // against a fake endpoint, and exits 0.
+  {
+    const refreshHome = path.join(tmp, "refresh-home");
+    const noTokenRun = await run("src/main.ts", ["refresh"], { env: { WRONGFORGE_HOME: refreshHome } });
+    assert(noTokenRun.code === 1 && noTokenRun.err.includes("not signed in"), "refresh without a session exits 1 with a clear message");
+
+    let modelsRequests = 0;
+    const tokenServer = http.createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (c: Buffer) => chunks.push(c));
+      req.on("end", () => {
+        if (req.url === "/v1/oauth/token") {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ access_token: "refresh-cmd-at", refresh_token: "refresh-cmd-rt", expires_in: 3600, scope: "user:inference" }));
+          return;
+        }
+        if (req.url?.startsWith("/v1/models")) {
+          modelsRequests++;
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ data: [{ type: "model", id: "claude-sonnet-5-5", display_name: "Claude Sonnet 5.5" }], has_more: false }));
+          return;
+        }
+        res.writeHead(404).end();
+      });
+    });
+    await new Promise<void>((r) => tokenServer.listen(0, "127.0.0.1", r));
+    const base = `http://127.0.0.1:${(tokenServer.address() as { port: number }).port}`;
+    const tokenStore = path.join(tmp, "refresh-cmd-tokens.json");
+    // pre-seed a signed-in session the same way `login`/`import` would
+    const seedOauth = new ClaudeOAuth(tokenStore);
+    process.env.ANTHROPIC_TOKEN_URL = `${base}/v1/oauth/token`;
+    process.env.CLAUDE_OAUTH_CLIENT_ID = "test-client-id";
+    await seedOauth.exchangeCode("seed-code", "seed-verifier", "https://console.anthropic.com/oauth/code/callback", "user:inference");
+    delete process.env.ANTHROPIC_TOKEN_URL;
+    delete process.env.CLAUDE_OAUTH_CLIENT_ID;
+
+    const refreshRun = await run("src/main.ts", ["refresh"], {
+      env: { CLAUDE_TOKEN_STORE: tokenStore, ANTHROPIC_TOKEN_URL: `${base}/v1/oauth/token`, ANTHROPIC_BASE_URL: base, CLAUDE_OAUTH_CLIENT_ID: "test-client-id" },
+    });
+    tokenServer.close();
+    assert(refreshRun.code === 0 && /refreshed; access token valid until .* \(1 models reachable\)/.test(refreshRun.out), `refresh with a signed-in session exits 0 (${refreshRun.code}, ${refreshRun.out}${refreshRun.err})`);
+    assert(modelsRequests === 1, "the refresh command makes exactly the one follow-up models request");
+  }
+
   // ======================================================== mcp-cli
   // An actionable CLI failure stays concise; debug mode retains its stack.
   const missingCredentials = path.join(tmp, "missing-credentials.json");

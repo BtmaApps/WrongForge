@@ -180,17 +180,58 @@ async function main(): Promise<void> {
   const countCc = (o: unknown): number => (JSON.stringify(o).match(/cache_control/g) ?? []).length;
   assert(countCc(r2!.body) === 2, "exactly 2 breakpoints (limit is 4)");
 
+  // A session's prompt-cache mode is locked by its first turn (Anthropic
+  // requires consistent TTL ordering across the whole cached prefix — see
+  // compaction.ts's isCacheOrderingError); a later task's own `cache`
+  // request is overridden by the session's locked mode, not honored.
+  // Session S's first turn (c1, above) used no explicit `cache` -> the
+  // server default ("1h") got locked in.
   const off = (await post({ session_id: S, prompt: "[[say x]]", cache: "off", wait: true })).body.task;
-  assert(countCc(fake.turns().at(-1)!.body) === 0 && off.cache === "off", 'cache:"off" sends no cache_control');
+  assert(countCc(fake.turns().at(-1)!.body) === 2 && off.cache === "1h", 'cache:"off" is overridden by the session\'s locked "1h" mode');
   await post({ session_id: S, prompt: "[[say y]]", cache: "5m", wait: true });
   const five = fake.turns().at(-1)!.body;
-  assert(countCc(five) === 2 && !JSON.stringify(five).includes('"ttl"'), 'cache:"5m" uses the default lifetime (no ttl field)');
+  assert(countCc(five) === 2 && JSON.stringify(five).includes('"ttl":"1h"'), 'cache:"5m" is also overridden — still ttl=1h, not the unmarked 5m lifetime');
 
   const sess = (await h.api("GET", `/v1/sessions/${S}`)).body;
   assert(sess.session.turns === 4 && sess.session.workdir === dirA && sess.session.title === "[[say first answer]]", "session meta: turns, workdir, title");
   assert(sess.session.context_tokens > 0 && sess.session.compactions === 0 && sess.in_use === false, "session meta: context tokens measured, not in use");
+  assert(sess.session.cache_mode === "1h", "session meta exposes the locked cache_mode");
+
+  // A DIFFERENT session's first turn locks in whatever IT started with —
+  // confirming the lock is per-session, not some other direction-specific
+  // special case (5m -> 1h is overridden exactly like 1h -> off/5m above).
+  const S2 = "cache-session-5m";
+  const first5m = (await post({ session_id: S2, prompt: "[[say a]]", cache: "5m", wait: true })).body.task;
+  assert(first5m.cache === "5m", "a session's first turn uses the cache mode it asked for");
+  const overriddenTo1h = (await post({ session_id: S2, prompt: "[[say b]]", cache: "1h", wait: true })).body.task;
+  assert(overriddenTo1h.cache === "5m", "a later task asking for 1h is overridden by the session's locked 5m");
+  assert(!JSON.stringify(fake.turns().at(-1)!.body).includes('"ttl"'), "the request actually sent still has no ttl field (5m, not 1h)");
   const pg = (await h.api("GET", `/v1/sessions/${S}/messages?offset=0&limit=2`)).body;
   assert(pg.messages.length === 2 && pg.total === sess.session.message_count, "messages endpoint paginates");
+
+  // A cache-ordering 400 (inconsistent TTLs in the cached prefix) is
+  // classified and recovered from exactly like context_overflow: the task
+  // fails with a dedicated code and the session is flagged for compaction
+  // so the next task on it compacts first (compactIfNeeded's
+  // "flagged_after_overflow" reason).
+  const S3 = "cache-ordering-session";
+  const badCache = (
+    await post({
+      session_id: S3,
+      prompt: "[[fail 400 a ttl='1h' cache_control block must not come after a ttl='5m' cache_control block]]",
+      wait: true,
+    })
+  ).body.task;
+  assert(
+    badCache.status === "failed" && badCache.error?.code === "cache_ordering_error",
+    `a cache-ordering 400 is classified as cache_ordering_error (status=${badCache.status}, code=${badCache.error?.code})`,
+  );
+  assert(
+    badCache.result && typeof badCache.result.context_tokens === "number" && badCache.result.context_window > 0,
+    "a failed task still reports context_tokens/context_window — not just the error message — so a caller can tell how close it got",
+  );
+  const s3meta = (await h.api("GET", `/v1/sessions/${S3}`)).body.session;
+  assert(s3meta.needs_compaction === true, "the session is flagged for compaction after a cache-ordering failure");
 
   // continuing after a server restart (new process state, same data directory)
   const home = h.home;

@@ -1,6 +1,6 @@
 {
   "name": "wrongforge",
-  "version": "0.4.6",
+  "version": "0.4.7",
   "private": true,
   "type": "module",
   "license": "MIT",
@@ -16,6 +16,7 @@
     "login": "tsx src/main.ts login",
     "import": "tsx src/main.ts import",
     "status": "tsx src/main.ts status",
+    "refresh": "tsx src/main.ts refresh",
     "url": "tsx src/main.ts url",
     "models": "tsx src/main.ts models",
     "webui": "npm --prefix webui run dev",

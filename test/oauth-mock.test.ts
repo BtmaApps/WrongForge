@@ -436,7 +436,67 @@ function main(): Promise<void> {
   });
 }
 
-main().catch((e) => {
-  console.error(e);
-  process.exit(1);
-});
+/**
+ * refreshTokenExpiresAt: parsed from refresh_token_expires_in when the token
+ * endpoint sends it (the exchange response here), carried forward — not
+ * cleared — when a later refresh response omits it (mirrors CC's own merge;
+ * re/notes/findings.md §14, mod-0150 jPr()/yE()).
+ */
+function testRefreshTokenExpiry(): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let call = 0;
+    const server = http.createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (c: Buffer) => chunks.push(c));
+      req.on("end", () => {
+        call++;
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            access_token: `rte-at-${call}`,
+            refresh_token: `rte-rt-${call}`,
+            expires_in: 3600,
+            scope: "user:inference",
+            // call 1 (exchange) sends it; call 2+ (refresh) omits it — the
+            // previously stored value must survive, not be cleared.
+            ...(call === 1 ? { refresh_token_expires_in: 2_592_000 } : {}),
+          }),
+        );
+      });
+    });
+    server.listen(0, "127.0.0.1", async () => {
+      try {
+        const port = (server.address() as http.AddressInfo).port;
+        process.env.ANTHROPIC_TOKEN_URL = `http://127.0.0.1:${port}/v1/oauth/token`;
+        process.env.CLAUDE_OAUTH_CLIENT_ID = "test-client-id";
+        const oauth = new ClaudeOAuth(path.join(mkTmp("wf-rte-"), "tokens.json"));
+        await oauth.exchangeCode("c", "v", "https://console.anthropic.com/oauth/code/callback", "user:inference");
+        const s1 = oauth.status() as { refreshTokenExpiresAt: number | null };
+        check(
+          typeof s1.refreshTokenExpiresAt === "number" && s1.refreshTokenExpiresAt > Date.now(),
+          "refresh_token_expires_in from the exchange is recorded on status()",
+        );
+        const before = s1.refreshTokenExpiresAt;
+        await oauth.getAccessToken(61 * 60_000); // wide margin forces an immediate refresh
+        const s2 = oauth.status() as { refreshTokenExpiresAt: number | null };
+        check(
+          s2.refreshTokenExpiresAt === before,
+          "a refresh response that omits refresh_token_expires_in keeps the previous value",
+        );
+        server.close();
+        console.log("REFRESH-TOKEN-EXPIRY TESTS PASSED ✓ (recorded on exchange, survives a refresh that omits it)");
+        resolve();
+      } catch (e) {
+        server.close();
+        reject(e);
+      }
+    });
+  });
+}
+
+main()
+  .then(testRefreshTokenExpiry)
+  .catch((e) => {
+    console.error(e);
+    process.exit(1);
+  });

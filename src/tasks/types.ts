@@ -27,6 +27,7 @@ export type TaskErrorCode =
   | "max_steps" //         step limit reached before the model finished
   | "max_tokens" //        output limit hit (finish_reason "length")
   | "context_overflow" //  the conversation does not fit the model's context window
+  | "cache_ordering_error" // the session's cache_control TTLs are ordered inconsistently (mixed cache modes across turns); fixed by compaction, same as context_overflow
   | "tool_gateway_unavailable" // the orchestrator's tool API could not be reached for discovery
   | "mcp_unavailable" //   a `required` MCP server selected for the task could not be reached
   | "server_restarted" //  the server stopped while the task was queued/running
@@ -145,6 +146,7 @@ export type TaskEventType =
   | "tools.loaded"
   | "session.compacting"
   | "session.compacted"
+  | "session.cache_mode_locked"
   | "context.cleared"
   | "agent.text"
   | "agent.report"

@@ -11,7 +11,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 import { agentTools } from "./tools/index.js";
-import { clearOldToolOutputs } from "./compaction.js";
+import { clearOldToolOutputs, estimateTokens, truncateToolOutput } from "./compaction.js";
 import { effectiveEffort, resolveEffort } from "./effort.js";
 import { runTool, type ToolSet } from "./tool.js";
 import { fromApiAssistantMessage, toApiMessages, type AgentMessage } from "./messages.js";
@@ -90,6 +90,9 @@ export interface ContextGuard {
   clearAt: number;
   /** Most recent tool results that are never cleared. */
   keepToolResults: number;
+  /** A single tool result bigger than this (chars, 0 = never) is clipped
+   *  before it reaches history, regardless of which tool produced it. */
+  maxToolResultChars: number;
 }
 
 /** Structured events emitted while a turn runs (used by the HTTP server). */
@@ -111,6 +114,7 @@ export type AgentEvent =
   | { type: "tool_call"; id: string; name: string; input: unknown }
   | { type: "tool_result"; id: string; name: string; output: unknown }
   | { type: "tool_error"; id: string; name: string; error: string }
+  | { type: "tool_output_truncated"; id: string; name: string; original_chars: number }
   | { type: "error"; error: string };
 
 // ------------------------------------------------------------------- tool defs
@@ -167,16 +171,24 @@ export async function runAgentTurn(
     input_tokens: 0, output_tokens: 0, total_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0,
   };
 
+  // In-task context guard (the prepareStep equivalent): once the live context
+  // passes clearAt, replace old tool outputs with a placeholder. Called both
+  // at the top of the loop AND right after a tool result is appended — see
+  // compaction.ts's file header (defense #2) for why the latter matters: the
+  // API's real usage numbers only arrive with the NEXT response, too late to
+  // catch a result that alone jumps contextTokens past clearAt.
+  const applyClearGuard = (): void => {
+    if (guard && guard.clearAt > 0 && contextTokens >= guard.clearAt) {
+      const r = clearOldToolOutputs(history, guard.keepToolResults);
+      if (r.cleared) {
+        onEvent?.({ type: "context_cleared", cleared: r.cleared, context_tokens: contextTokens });
+      }
+    }
+  };
+
   try {
     while (steps < maxSteps) {
-      // In-task context guard (the prepareStep equivalent): once the live
-      // context passes clearAt, replace old tool outputs with a placeholder.
-      if (guard && guard.clearAt > 0 && contextTokens >= guard.clearAt) {
-        const r = clearOldToolOutputs(history, guard.keepToolResults);
-        if (r.cleared) {
-          onEvent?.({ type: "context_cleared", cleared: r.cleared, context_tokens: contextTokens });
-        }
-      }
+      applyClearGuard();
 
       steps++;
       onEvent?.({ type: "step_start", step: steps });
@@ -255,22 +267,41 @@ export async function runAgentTurn(
       if (final.stop_reason !== "tool_use" || toolUses.length === 0) break;
 
       const results = [];
+      let appendedChars = 0;
+      const maxToolResultChars = guard?.maxToolResultChars ?? 0;
       for (const call of toolUses) {
         const r = await runTool(tools[call.name], call.input, {
           abortSignal,
           toolCallId: call.id,
         });
+        // Cap a single result's size here, before it ever reaches history —
+        // the one defense that works regardless of which tool produced it
+        // (built-in tools already self-limit; MCP/gateway tools may not).
+        // See compaction.ts's file header, defense #1.
+        const rawOutput = r.ok ? r.output : { ok: false, error: r.error };
+        const cap = truncateToolOutput(rawOutput, maxToolResultChars);
+        appendedChars += cap.originalChars;
+        if (cap.truncated) {
+          onEvent?.({ type: "tool_output_truncated", id: call.id, name: call.name, original_chars: cap.originalChars });
+        }
         if (r.ok) {
-          if (onEvent) onEvent({ type: "tool_result", id: call.id, name: call.name, output: r.output });
-          else console.log(`\n\x1b[2m  ↳ ${summarize(r.output)}\x1b[0m`);
-          results.push({ type: "tool-result" as const, toolCallId: call.id, toolName: call.name, output: r.output });
+          if (onEvent) onEvent({ type: "tool_result", id: call.id, name: call.name, output: cap.output });
+          else console.log(`\n\x1b[2m  ↳ ${summarize(cap.output)}\x1b[0m`);
         } else {
           if (onEvent) onEvent({ type: "tool_error", id: call.id, name: call.name, error: r.error });
           else console.error(`\n\x1b[31m  ↳ tool error: ${r.error}\x1b[0m`);
-          results.push({ type: "tool-result" as const, toolCallId: call.id, toolName: call.name, output: { ok: false, error: r.error } });
         }
+        results.push({ type: "tool-result" as const, toolCallId: call.id, toolName: call.name, output: cap.output });
       }
       history.push({ role: "tool", content: results });
+      // Proactive estimate (see compaction.ts's file header, defense #2): the
+      // API's real usage numbers only arrive with the NEXT response, which is
+      // too late for the guard below to catch a result that alone jumps past
+      // clearAt. This estimate exists purely to make that check fire at the
+      // right moment — the next step_finish event overwrites it with the
+      // real count regardless.
+      contextTokens += estimateTokens(appendedChars);
+      applyClearGuard();
     }
   } catch (e) {
     if (abortSignal?.aborted) {

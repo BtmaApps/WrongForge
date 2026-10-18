@@ -1,21 +1,38 @@
 /**
  * Context management for long sessions.
  *
- * A session's whole history is sent with every request. Two defenses keep it
- * from outgrowing the model's context window:
+ * A session's whole history is sent with every request. Three defenses keep
+ * it from outgrowing the model's context window:
  *
- *  1. In-task guard — `clearOldToolOutputs` (used from `prepareStep` in
+ *  1. Per-result cap — `truncateToolOutput` (used right after `runTool` in
+ *     agent.ts, before a result ever reaches `history`): any single tool
+ *     result bigger than `maxToolResultChars` is clipped there and then,
+ *     regardless of which tool produced it. Built-in tools (bash/read/
+ *     web_fetch/grep) already bound their own output; MCP and gateway tools
+ *     do not — this is the backstop for those, and for anything that slips
+ *     through. Without it, one oversized result can push a request straight
+ *     past the model's context window before anything else in this file
+ *     gets a chance to react (see `clearAt` below).
+ *
+ *  2. In-task guard — `clearOldToolOutputs` (used from the step loop in
  *     agent.ts): when the live context passes `clearAt` tokens, old tool
  *     outputs are replaced by a short placeholder (the model's own text and
- *     tool calls stay). Cheap, no extra model call.
+ *     tool calls stay). Cheap, no extra model call. Checked both before each
+ *     step AND right after a tool result is appended, using a same-turn
+ *     character-count estimate of that result (the API's own usage numbers
+ *     only arrive with the *next* response, too late to catch a result that
+ *     alone jumps past the limit — the estimate exists purely to make this
+ *     check fire at the right moment, not to replace the real count).
  *
- *  2. Between tasks — `compactMessages`: older turns are summarized by the
+ *  3. Between tasks — `compactMessages`: older turns are summarized by the
  *     model into one message; the most recent turns stay verbatim. The
  *     originals are archived by the session store, never lost.
  *
- * Both change the request prefix once, so the prompt cache is rewritten once
- * and then stable again. Sizes come from the API's own usage numbers, not
- * from guesses.
+ * All three change the request prefix at most once per occurrence, so the
+ * prompt cache is rewritten once and then stable again. Reported sizes
+ * (`context_tokens` on a finished turn) still come from the API's own usage
+ * numbers — the character estimate in #1/#2 only drives *when* a defense
+ * reacts, never what gets reported to the caller.
  */
 
 import type Anthropic from "@anthropic-ai/sdk";
@@ -37,6 +54,12 @@ export interface ContextConfig {
   keepTurns: number;
   /** Most recent tool results never cleared by the in-task guard. Default 8. */
   keepToolResults: number;
+  /** A single tool result bigger than this (chars, 0 = never) is clipped
+   *  before it ever reaches history — see `truncateToolOutput`. Default
+   *  400 000 (~100K tokens): generous next to what built-in tools already
+   *  self-limit to (tens of thousands of chars), it exists to catch an
+   *  oversized MCP/gateway result, not to constrain normal use. */
+  maxToolResultChars: number;
   /** Model for the summary (default: the task's model). */
   summaryModel?: string;
 }
@@ -53,8 +76,20 @@ export function contextConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Cont
     clearAt: num(env.WRONGFORGE_CLEAR_AT, 600_000),
     keepTurns: Math.max(1, num(env.WRONGFORGE_COMPACT_KEEP_TURNS, 2)),
     keepToolResults: Math.max(1, num(env.WRONGFORGE_KEEP_TOOL_RESULTS, 8)),
+    maxToolResultChars: num(env.WRONGFORGE_MAX_TOOL_OUTPUT_CHARS, 400_000),
     summaryModel: env.WRONGFORGE_SUMMARY_MODEL || undefined,
   };
+}
+
+/** Rough chars-per-token used only to decide WHEN the in-task guard should
+ *  react to a just-appended tool result — never to report a real count (see
+ *  the file header). The API's own usage numbers always win on the next
+ *  response. */
+const CHARS_PER_TOKEN_ESTIMATE = 4;
+
+/** Kept in one place so `agent.ts` and this file agree on the same guess. */
+export function estimateTokens(chars: number): number {
+  return Math.ceil(chars / CHARS_PER_TOKEN_ESTIMATE);
 }
 
 /** Does this provider error mean "the prompt does not fit"? */
@@ -62,6 +97,63 @@ export function isContextOverflow(text: string): boolean {
   return /prompt is too long|input is too long|context (length|window)|exceeds? the (maximum|context)|too many (input )?tokens|maximum context/i.test(
     text,
   );
+}
+
+/**
+ * Does this provider error mean "the cache_control TTLs in this request are
+ * ordered inconsistently"? Anthropic requires a consistent TTL ordering
+ * across the whole cached prefix (tools -> system -> messages); a later
+ * turn using a different `cache` mode than an earlier one on the same
+ * session can produce exactly this (cache.ts only ever marks the newest
+ * message, never touching older cache_control blocks already in history).
+ * Like context overflow, this is recoverable by compacting the session:
+ * the offending older blocks get summarized away, not re-sent.
+ */
+export function isCacheOrderingError(text: string): boolean {
+  // Matched on presence, not a fixed word order, so a slightly reworded API
+  // message (e.g. "ttl" and "cache_control" swapped) still gets caught —
+  // the exact sentence captured live was "a ttl='1h' cache_control block
+  // must not come after a ttl='5m' cache_control block".
+  return /cache_control/i.test(text) && /must not come after/i.test(text) && /ttl/i.test(text);
+}
+
+// --------------------------------------------------------- 0. per-result cap
+
+export interface ToolOutputCap {
+  /** The output to store — unchanged, or a clipped string in its place. */
+  output: unknown;
+  truncated: boolean;
+  /** Length of the serialized output, always reported — used by callers to
+   *  keep a running estimate of live context size even when nothing was
+   *  truncated. */
+  originalChars: number;
+}
+
+/**
+ * Caps a single tool result's serialized size, independent of which tool
+ * produced it — built-in, gateway, or MCP (see the file header, defense #1).
+ * `maxChars <= 0` disables this. Mirrors how the result is later serialized
+ * for the API (`outputToText` in messages.ts: strings pass through, anything
+ * else is JSON.stringify'd) so the size checked here matches what the model
+ * actually receives.
+ */
+export function truncateToolOutput(output: unknown, maxChars: number): ToolOutputCap {
+  let text: string;
+  if (typeof output === "string") text = output;
+  else {
+    try {
+      text = JSON.stringify(output ?? null);
+    } catch {
+      text = String(output);
+    }
+  }
+  // originalChars is reported even when disabled/under the limit — callers
+  // (agent.ts) use it to keep the live contextTokens estimate accurate.
+  if (maxChars <= 0 || text.length <= maxChars) return { output, truncated: false, originalChars: text.length };
+  const head = Math.floor(maxChars * 0.7);
+  const tail = maxChars - head;
+  const clipped = `${text.slice(0, head)}\n…[${text.length - maxChars} chars omitted — result exceeded WRONGFORGE_MAX_TOOL_OUTPUT_CHARS (${maxChars})]…\n${text.slice(text.length - tail)}`;
+  return { output: clipped, truncated: true, originalChars: text.length };
 }
 
 // ------------------------------------------------------- 1. clear tool outputs
