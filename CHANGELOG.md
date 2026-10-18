@@ -6,6 +6,8 @@ package.json and the git tags that drive the release workflow.
 
 ## [Unreleased]
 
+## [0.4.9] — 2026-10-19
+
 ### Fixed
 - **`wrongforge update` (and `WRONGFORGE_AUTO_UPDATE`) always refused to run**
   with "self-update replaces the compiled binary" — on every binary, every
