@@ -495,11 +495,15 @@ API's 1 MB is too small for long contexts and inline images).
 
 **Watch it happen:** the dashboard's **Proxy** tab shows every call to this
 surface live — method, model, `stream`/`auth_mode`, status, duration, and the
-request/response bodies themselves (expandable). It is fed by its own
-`proxy.call` SSE channel (`docs/TASKS-API.md`), separate from the task
-firehose. Bodies shown there are a size-capped copy for display only
-(`WRONGFORGE_PROXY_TAP_BODY_CAP`, default 8 KB) — truncation there never
-touches what the real client actually exchanged.
+request/response bodies themselves (expandable). Each body's button shows a
+human-readable summary by default (model, message/tool counts, the last
+message's or reply's tool calls and text — reconstructed from the raw SSE
+text for streaming calls too) rather than raw JSON; click it for the full
+payload, unchanged. It is fed by its own `proxy.call` SSE channel
+(`docs/TASKS-API.md`), separate from the task firehose. Bodies shown there
+are a size-capped copy for display only (`WRONGFORGE_PROXY_TAP_BODY_CAP`,
+default 8 KB) — truncation there never touches what the real client actually
+exchanged.
 
 ## Sessions & context management
 

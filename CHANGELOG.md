@@ -6,6 +6,23 @@ package.json and the git tags that drive the release workflow.
 
 ## [Unreleased]
 
+## [0.4.8] — 2026-10-19
+
+### Added
+- **Dashboard "Proxy" tab: human-readable request/response summaries**
+  instead of a flat "raw" button. Model, message/tool counts and the last
+  message's content (text/tool_use/tool_result/thinking) for requests;
+  finish reason, token usage and reply content for responses — for
+  streaming calls too, by replaying the raw SSE event text (`proxy.ts`
+  never reconstructs it server-side) into an approximate final message
+  client-side. Click still opens the full raw JSON, unchanged
+  (`webui/src/lib/anthropicSummary.ts`). Also fixed the Sessions tab's
+  message preview, which never actually summarized a stored tool call: it
+  checked for the Anthropic wire format's `tool_use`/`name` instead of the
+  stored session format's `tool-call`/`toolName` (`src/messages.ts`), so
+  every tool call fell through to a generic `(tool-call)` placeholder; now
+  shows `⇢ toolName(input)`.
+
 ## [0.4.7] — 2026-10-18
 
 ### Added

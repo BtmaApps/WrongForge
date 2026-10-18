@@ -11,6 +11,7 @@ import { useState } from "react";
 import { useStore } from "../lib/store.js";
 import { JsonPeek } from "./bits.js";
 import { httpStatusClass } from "./LiveFeed.js";
+import { summarizeAnthropicRequest, summarizeAnthropicResponse } from "../lib/anthropicSummary.js";
 import type { ProxyCall } from "../lib/types.js";
 
 function ProxyCallRow({ call }: { call: ProxyCall }) {
@@ -36,13 +37,13 @@ function ProxyCallRow({ call }: { call: ProxyCall }) {
             <div className="io-label">
               request{call.request_truncated && <span className="dim"> (truncated — showing the first bytes only)</span>}
             </div>
-            <JsonPeek value={call.request_body ?? "∅"} label="raw" max={0} />
+            <JsonPeek value={call.request_body ?? "∅"} label={summarizeAnthropicRequest(call.request_body)} max={0} />
           </div>
           <div className="tool-io-col">
             <div className="io-label">
               response{call.response_truncated && <span className="dim"> (truncated — showing the first bytes only)</span>}
             </div>
-            <JsonPeek value={call.response_body ?? "∅"} label="raw" max={0} />
+            <JsonPeek value={call.response_body ?? "∅"} label={summarizeAnthropicResponse(call.response_body, { stream: call.stream })} max={0} />
           </div>
         </div>
       )}

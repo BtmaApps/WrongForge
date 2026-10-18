@@ -126,13 +126,17 @@ function MessageRow({ m }: { m: AgentMessage }) {
   let text = "";
   if (typeof m.content === "string") text = m.content;
   else if (Array.isArray(m.content)) {
-    text = (m.content as Array<{ type?: string; text?: string; name?: string; toolName?: string }>)
+    // Stored shape (src/messages.ts): "tool-call"/"tool-result" (hyphenated,
+    // toolName/input/output) — not the API wire format's "tool_use"/
+    // "tool_result" (underscored, name/content), which these messages never
+    // actually carry once read back from a session file.
+    text = (m.content as Array<{ type?: string; text?: string; toolName?: string; input?: unknown; output?: unknown }>)
       .map((b) =>
         b.type === "text"
           ? b.text ?? ""
-          : b.type === "tool_use"
-            ? `⇢ ${b.name}()`
-            : b.type === "tool-result" || b.type === "tool_result"
+          : b.type === "tool-call"
+            ? `⇢ ${b.toolName ?? "tool"}(${JSON.stringify(b.input ?? {}).slice(0, 60)})`
+            : b.type === "tool-result"
               ? `⇠ ${b.toolName ?? "tool"}`
               : b.type === "thinking"
                 ? "(thinking)"
