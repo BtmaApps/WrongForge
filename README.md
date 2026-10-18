@@ -532,6 +532,8 @@ src/effort.ts      model-aware reasoning effort (effort field per model family)
 src/log.ts         JSONL logs (masking, rollover, gzip)   src/maintenance.ts  retention
 src/app.ts         wires everything from env   src/apikey.ts  API key resolution
 src/main.ts        CLI + REPL        src/server.ts     HTTP API (+ optional dashboard)
+src/update.ts      release checks + self-update (prepare/install split)
+src/supervisor.ts  crash-restart supervisor (WRONGFORGE_SUPERVISE=1)
 src/mcp-cli.ts     MCP CLI
 webui/             the dashboard itself: React 19 + Radix UI + React Flow (Vite);
                    `webui:build` compiles it to webui/dist, which server.ts serves at /
@@ -581,6 +583,9 @@ Environment variables (all optional unless noted):
 | `WRONGFORGE_MCP_CONFIG`, `_MCP_IDLE_MS`, `_MCP_TOOLS_TTL_MS`, `_MCP_AGENT_MANAGE` | MCP config path, pool idle time, tool-list TTL, allow the agent to add/remove servers (1) |
 | `WRONGFORGE_GATEWAY_ALLOWED_HOSTS`, `_GATEWAY_DISCOVERY_TTL_MS` | Non-loopback gateway hosts; discovery cache (30 s) |
 | `WRONGFORGE_LOG_COMPRESS_AFTER_DAYS` / `_LOG_RETENTION_DAYS` / `_TASK_COMPRESS_AFTER_DAYS` / `_TASK_RETENTION_DAYS` / `_SESSION_RETENTION_DAYS` / `_MAINTENANCE_INTERVAL_MIN` | Housekeeping (defaults 1 / 30 / 3 / 90 / 0 = keep / 60; `0` disables a step) |
+| `WRONGFORGE_AUTO_UPDATE` | `1` installs a newer release automatically once idle (compiled binary only; off by default — see [Releases](docs/RELEASE.md)) |
+| `WRONGFORGE_AUTO_UPDATE_POLL_MS` | How often the idle+update-available condition is checked (2 min) |
+| `WRONGFORGE_SUPERVISE` | `1` runs `serve` under a crash-restart supervisor with capped exponential backoff (off by default) |
 | `NO_COLOR` | Plain startup banner |
 
 ## Data directory

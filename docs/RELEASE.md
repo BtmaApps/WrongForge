@@ -77,6 +77,67 @@ sha256 digest for the asset is **not installed** — the update fails closed
 rather than installing unverified bytes. If the digest does not match, nothing
 is installed either.
 
+## Automatic updates
+
+`WRONGFORGE_AUTO_UPDATE=1` turns `wrongforge update`'s manual flow into a
+background one — **opt-in, off by default**: a binary replacing itself
+unattended is a real behavior change, and existing installs (systemd/pm2
+units, install scripts) should never be affected just by upgrading WrongForge.
+
+Only the compiled binary can self-update at all (the same restriction
+`wrongforge update` already has); a source checkout with the flag set logs a
+warning once at startup and never arms the poller. When armed, every
+`WRONGFORGE_AUTO_UPDATE_POLL_MS` (default 2 min) it checks: did the daily
+update check (above) already find something newer, **and** is the server
+idle right now (no queued or running task)? Only when both are true does it
+download and verify the asset (`prepareUpdate()` — pure network, nothing is
+torn down if this fails) and, only once that succeeds, close the listening
+port and background work and install it (`installUpdate()`). An update is
+never allowed to interrupt a task in progress, and a network hiccup during
+the check never affects the running server — it just tries again next poll.
+
+```bash
+WRONGFORGE_AUTO_UPDATE=1 wrongforge serve
+```
+
+`/v1/info` → `auto_update: { enabled, supervised }` reports whether this is
+actually armed (`enabled` is false in source mode even with the flag set) and
+whether a supervisor (below) owns restarting the process afterward.
+
+## Crash-restart supervisor
+
+`WRONGFORGE_SUPERVISE=1` makes `wrongforge serve` become a small supervisor
+process instead of the server itself: it spawns the real server as a child
+and restarts it whenever it exits — a crash, or the respawn-free exit an
+auto-update takes when a supervisor owns it (see above) — with capped
+exponential backoff (1 s → 2 s → … → 60 s; a child that stayed up at least a
+minute resets the backoff back to 1 s), so a persistently broken binary
+cannot spin in a tight restart loop. **Off by default**, for the same reason
+as automatic updates: a process that restarts itself after exit(0) is a
+surprise unless asked for.
+
+```bash
+WRONGFORGE_SUPERVISE=1 wrongforge serve
+```
+
+The supervisor's own `Ctrl+C` / `SIGTERM` is the one case that does not
+restart: the signal is forwarded to the child first, and only once the child
+has actually exited does the supervisor exit too.
+
+Combine both for a self-healing, self-updating server:
+
+```bash
+WRONGFORGE_SUPERVISE=1 WRONGFORGE_AUTO_UPDATE=1 wrongforge serve
+```
+
+Under a supervisor, the server passes `respawn: false` to `installUpdate()`
+after an automatic update — the supervisor already restarts the process on
+exit either way, so a self-respawn here would just race it for the port.
+
+Out of scope here: registering as a Windows service (NSSM/`sc.exe`) or a
+systemd unit — the supervisor is self-contained; a service wrapper is a
+separate concern if ever needed.
+
 ## macOS note
 
 The macOS binaries are **unsigned** — Gatekeeper quarantines them on first

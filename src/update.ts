@@ -3,12 +3,22 @@
  * replace the running binary with the release asset.
  *
  *   checkForUpdate()   what the serve banner + /v1/info show (never throws)
- *   selfUpdate()       `wrongforge update`: download → sha256 verify → swap
+ *   prepareUpdate()    download + sha256 verify only — no filesystem/restart
+ *   installUpdate()    swap the verified bytes in, respawn, exit — no network
+ *   selfUpdate()       `wrongforge update`: prepareUpdate() then installUpdate()
  *
- * Repo: WRONGFORGE_UPDATE_REPO (default ersinkoc/WrongForge). Checks are off
+ * Repo: WRONGFORGE_UPDATE_REPO (default WrongStack/WrongForge). Checks are off
  * with WRONGFORGE_UPDATE_CHECK=0 (and in test mode, ANTHROPIC_BASE_URL set).
  * The swap renames the running executable aside — allowed even on Windows —
  * moves the verified download into place, and respawns with the same argv.
+ *
+ * Automatic use (src/server.ts, opt-in via WRONGFORGE_AUTO_UPDATE=1): the
+ * server calls prepareUpdate() while still fully serving — a network failure
+ * there touches nothing — and only calls installUpdate() (which tears down
+ * the listening port first) once that succeeded. `respawn: false` is passed
+ * when a crash-restart supervisor (src/supervisor.ts, WRONGFORGE_SUPERVISE=1)
+ * owns this process, since the supervisor restarts it on exit either way; a
+ * bare, unsupervised server keeps the CLI's respawn-itself behavior.
  */
 
 import * as crypto from "node:crypto";
@@ -28,6 +38,12 @@ export interface UpdateAvailable {
 
 export interface ReleaseInfo extends UpdateAvailable {
   asset?: { name: string; url: string; digest?: string; size: number };
+}
+
+/** Test seam: replaces the real GitHub call with `fn`; null restores it. */
+let latestReleaseOverride: (() => Promise<ReleaseInfo | null>) | null = null;
+export function setLatestReleaseForTest(fn: (() => Promise<ReleaseInfo | null>) | null): void {
+  latestReleaseOverride = fn;
 }
 
 /** Numeric-aware a.b.c comparison; true when `latest` > `current`. */
@@ -50,6 +66,7 @@ export function assetName(): string {
 
 /** Latest release from GitHub, or null (offline / disabled / no releases). */
 export async function latestRelease(): Promise<ReleaseInfo | null> {
+  if (latestReleaseOverride) return latestReleaseOverride();
   if (process.env.WRONGFORGE_UPDATE_CHECK === "0") return null;
   if (process.env.ANTHROPIC_BASE_URL) return null; // test/proxy mode: no real network
   try {
@@ -96,32 +113,50 @@ export async function checkForUpdate(): Promise<UpdateAvailable | null> {
   return lastCheck;
 }
 
+/** Test seam: forces isCompiledBinary()'s return value; null restores it.
+ *  Needed because it is always false under tsx/node — without this, nothing
+ *  that gates on it (the auto-update timer, prepareUpdate()) can be driven
+ *  through an integration test at all. */
+let isCompiledBinaryOverride: boolean | null = null;
+export function setIsCompiledBinaryForTest(v: boolean | null): void {
+  isCompiledBinaryOverride = v;
+}
+
 /** True when running as a compiled executable (self-update only then). */
-function isCompiledBinary(): boolean {
+export function isCompiledBinary(): boolean {
+  if (isCompiledBinaryOverride !== null) return isCompiledBinaryOverride;
   const exec = process.execPath.toLowerCase();
   return exec.includes("wrongforge") && !exec.includes("node_modules") && process.argv[0]?.toLowerCase().includes("wrongforge");
 }
 
+export interface SelfUpdateOptions {
+  /** Respawn with the same argv after the swap (default true — the CLI's
+   *  behavior). A crash-restart supervisor (WRONGFORGE_SUPERVISE=1) passes
+   *  false: it owns restarting this process on exit, so a self-respawn here
+   *  would race it for the listening port. */
+  respawn?: boolean;
+}
+
+export interface PreparedUpdate {
+  rel: ReleaseInfo;
+  bytes: Buffer;
+}
+
 /**
- * `wrongforge update`: download the asset for this platform, verify its
- * sha256 digest against the release metadata, swap it in place of the
- * running executable and respawn. Returns a status line (or throws).
+ * Network phase: check for a newer release, download its asset for this
+ * platform, verify its sha256 digest. Touches nothing on disk and never
+ * restarts anything — safe to call while the server is still fully up,
+ * so a caller can confirm an update is real and verified BEFORE tearing
+ * anything down for it. Returns null when already current.
  */
-export async function selfUpdate(): Promise<string> {
+export async function prepareUpdate(): Promise<PreparedUpdate | null> {
   const rel = await latestRelease();
   if (!rel) throw new Error(`cannot reach https://github.com/${UPDATE_REPO}/releases (or checks are disabled)`);
-  if (!isNewer(rel.latest, rel.current)) return `already up to date (${VERSION})`;
+  if (!isNewer(rel.latest, rel.current)) return null;
   if (!rel.asset) throw new Error(`release ${rel.latest} has no asset "${assetName()}" for this platform`);
   if (!isCompiledBinary()) {
     throw new Error("self-update replaces the compiled binary — run it as `wrongforge update` from the executable, not from source");
   }
-  const exe = process.execPath;
-  // Owned by THIS process only. A fixed `<exe>.old` is shared by every instance
-  // running from the same path, so cleaning it could delete another instance's
-  // only copy of the previous binary.
-  const old = asidePath(exe);
-  const download = path.join(path.dirname(exe), `.wrongforge-update-${process.pid}-${Date.now()}`);
-
   const res = await fetch(rel.asset.url, { signal: AbortSignal.timeout(300_000) });
   if (!res.ok) throw new Error(`download failed: HTTP ${res.status}`);
   const bytes = Buffer.from(await res.arrayBuffer());
@@ -135,6 +170,27 @@ export async function selfUpdate(): Promise<string> {
   const want = rel.asset.digest.replace(/^sha256:/, "");
   const got = crypto.createHash("sha256").update(bytes).digest("hex");
   if (got !== want) throw new Error(`sha256 mismatch (wanted ${want.slice(0, 16)}…, got ${got.slice(0, 16)}…) — refusing to install`);
+  return { rel, bytes };
+}
+
+/**
+ * Filesystem phase: swap a `prepareUpdate()`-verified download in place of
+ * the running executable and (optionally) respawn. No network involved, so
+ * once `prepared` is in hand this essentially cannot fail from the outside
+ * world — the point of splitting it from `prepareUpdate()` is so a caller
+ * that needs to tear something down first (closing a listening port) can do
+ * so only after the network leg already succeeded. Exits the process on
+ * success; never returns normally.
+ */
+export function installUpdate(prepared: PreparedUpdate, opts: SelfUpdateOptions = {}): void {
+  const respawn = opts.respawn ?? true;
+  const { rel, bytes } = prepared;
+  const exe = process.execPath;
+  // Owned by THIS process only. A fixed `<exe>.old` is shared by every instance
+  // running from the same path, so cleaning it could delete another instance's
+  // only copy of the previous binary.
+  const old = asidePath(exe);
+  const download = path.join(path.dirname(exe), `.wrongforge-update-${process.pid}-${Date.now()}`);
   fs.writeFileSync(download, bytes, { mode: 0o755 });
 
   // Windows allows RENAMING a running exe (not deleting it): move the old
@@ -157,9 +213,25 @@ export async function selfUpdate(): Promise<string> {
     throw new Error(`could not move the new binary into place: ${(e as Error).message}`);
   }
   const args = process.argv.slice(1);
-  console.log(`updated ${rel.current} → ${rel.latest}; restarting…`);
-  if (args.length) spawn(exe, args, { detached: true, stdio: "ignore" }).unref();
+  if (respawn) {
+    console.log(`updated ${rel.current} → ${rel.latest}; restarting…`);
+    if (args.length) spawn(exe, args, { detached: true, stdio: "ignore" }).unref();
+  } else {
+    console.log(`updated ${rel.current} → ${rel.latest}; the supervisor will restart it`);
+  }
   process.exit(0);
+}
+
+/**
+ * `wrongforge update`: the combined CLI flow — prepare then install.
+ * Returns a status line when already current (or throws); otherwise exits
+ * the process on success, same as `installUpdate()`.
+ */
+export async function selfUpdate(opts: SelfUpdateOptions = {}): Promise<string> {
+  const prepared = await prepareUpdate();
+  if (!prepared) return `already up to date (${VERSION})`;
+  installUpdate(prepared, opts);
+  return ""; // unreachable — installUpdate() always exits the process
 }
 
 /** The rollback copy an update process owns while it swaps the binary. */

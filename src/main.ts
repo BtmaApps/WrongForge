@@ -61,6 +61,20 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
 
   // ---- binary commands (the compiled executable is this same entry point)
   if (cmd === "serve") {
+    // WRONGFORGE_SUPERVISE=1: this process becomes the crash-restart
+    // supervisor instead of serving itself — it spawns the real server as a
+    // child (marked WRONGFORGE_SUPERVISED_CHILD=1 so that child never
+    // recurses into a second supervisor) and restarts it on exit. See
+    // src/supervisor.ts. Uses process.argv.slice(1) — the same respawn argv
+    // selfUpdate() uses — not the `args`/argv parameter above (slice(2)):
+    // that already dropped whatever leading element the compiled binary's
+    // own argv carries (see update.ts's respawn), and the child must see
+    // exactly that element again to parse "serve" as its own argv[... ].
+    if (process.env.WRONGFORGE_SUPERVISE === "1" && !process.env.WRONGFORGE_SUPERVISED_CHILD) {
+      const { runSupervisor } = await import("./supervisor.js");
+      await runSupervisor(process.argv.slice(1)); // resolves only once told to stop
+      return;
+    }
     const { startEnvServer } = await import("./server.js");
     await startEnvServer();
     return;

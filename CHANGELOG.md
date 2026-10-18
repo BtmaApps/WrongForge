@@ -6,6 +6,30 @@ package.json and the git tags that drive the release workflow.
 
 ## [Unreleased]
 
+## [0.4.6] — 2026-10-18
+
+### Added
+- **Automatic self-update** (`WRONGFORGE_AUTO_UPDATE=1`, off by default):
+  `serve` installs a newer release on its own once the server is idle (no
+  queued/running task) — a release already found by the existing daily check
+  is downloaded and sha256-verified while still fully serving, and only once
+  that succeeds does it close the listening port and install it. Compiled
+  binary only, same as `wrongforge update`. `WRONGFORGE_AUTO_UPDATE_POLL_MS`
+  (default 2 min) controls how often the idle+update-available condition is
+  checked. `/v1/info` → `auto_update: { enabled, supervised }`.
+- **Crash-restart supervisor** (`WRONGFORGE_SUPERVISE=1`, off by default):
+  `serve` runs the real server as a child and restarts it on exit — crash or
+  otherwise — with capped exponential backoff (1 s → 60 s, reset after a
+  minute of uptime). Its own `Ctrl+C`/`SIGTERM` is forwarded to the child and
+  does not trigger a restart. Combine both for a self-healing,
+  self-updating server: `WRONGFORGE_SUPERVISE=1 WRONGFORGE_AUTO_UPDATE=1
+  wrongforge serve`. See `docs/RELEASE.md`.
+- `src/update.ts`: `selfUpdate()` split into `prepareUpdate()` (network:
+  check, download, sha256 verify) and `installUpdate()` (filesystem: swap +
+  respawn + exit) — `wrongforge update` still calls both in sequence; the
+  split is what lets the automatic path verify an update before tearing
+  anything down for it.
+
 ## [0.4.5] — 2026-10-18
 
 ### Added

@@ -43,7 +43,7 @@ import { McpConfigError } from "./mcp/config.js";
 import { McpError } from "./mcp/registry.js";
 import { SessionStore } from "./sessions.js";
 import { startLiveView } from "./liveview.js";
-import { checkForUpdate, cleanupOldBinary, lastUpdateCheck, UPDATE_REPO } from "./update.js";
+import { checkForUpdate, cleanupOldBinary, installUpdate, isCompiledBinary, lastUpdateCheck, prepareUpdate, UPDATE_REPO } from "./update.js";
 
 const MAX_BODY = 1_000_000;
 const TERMINAL_EVENTS = new Set(["task.completed", "task.failed", "task.cancelled", "task.timed_out"]);
@@ -570,6 +570,11 @@ export function createAgentServer(opts: ServerOptions): http.Server {
       effort: { default: process.env.WRONGFORGE_EFFORT || "high", levels: ["low", "medium", "high", "xhigh", "max", "off"] },
       /** A newer GitHub release was seen at startup / by the periodic check. */
       update: lastUpdateCheck(),
+      /** WRONGFORGE_AUTO_UPDATE=1: install it automatically once idle. `enabled`
+       * reflects whether that is actually armed (false in source mode even with
+       * the flag set — see the startup warning); `supervised` means a
+       * WRONGFORGE_SUPERVISE=1 parent owns restarting this process afterward. */
+      auto_update: { enabled: process.env.WRONGFORGE_AUTO_UPDATE === "1" && isCompiledBinary(), supervised: !!process.env.WRONGFORGE_SUPERVISED_CHILD },
       limits: { max_body_bytes: MAX_BODY, max_steps: 500, default_max_steps: 50 },
       proxy: {
         enabled: proxyEnabled(),
@@ -931,20 +936,73 @@ export async function startEnvServer(): Promise<EnvServer> {
   const keepAliveTimer = setInterval(keepAlive, keepAliveMs);
   keepAliveTimer.unref();
 
+  // Automatic self-update (opt-in, WRONGFORGE_AUTO_UPDATE=1): installs a
+  // release the daily checkForUpdate() above already found — this timer does
+  // not itself ask GitHub again, it only watches for the moment both the
+  // known result and the idle condition line up, at a much tighter interval
+  // than the daily check. Only ever installs while idle (no queued/running
+  // task), per the design: an update must never interrupt work in progress.
+  // Source mode (not the compiled binary) cannot self-update at all — warn
+  // once at startup instead of on every poll, and never arm the timer.
+  const autoUpdateEnabled = process.env.WRONGFORGE_AUTO_UPDATE === "1";
+  if (autoUpdateEnabled && !isCompiledBinary()) {
+    app.logger.warn("auto_update.unavailable", { reason: "not running as the compiled binary — run the release executable to enable WRONGFORGE_AUTO_UPDATE" });
+  }
+  const autoUpdatePollMs = Number(process.env.WRONGFORGE_AUTO_UPDATE_POLL_MS ?? 2 * 60_000);
+  let autoUpdateTimer: NodeJS.Timeout | undefined;
+
   let stopping = false;
-  const shutdown = (signal = "shutdown"): void => {
-    if (stopping) return;
+  // Tears down the listening port and background work, in order, so nothing
+  // that wants to reuse this port (an update's respawn, or a supervisor that
+  // will restart this process) can race this process for it. Idempotent —
+  // a second caller while shutdown is already underway gets the same promise.
+  let stopPromise: Promise<void> | null = null;
+  const stopServing = (signal: string): Promise<void> => {
+    if (stopPromise) return stopPromise;
     stopping = true;
     console.log(`\n${signal}: stopping — interrupting running tasks…`);
     app.logger.info("server.stopping", { signal });
     stopMaintenance();
     clearInterval(keepAliveTimer);
-    server.close();
-    void (async () => {
+    clearInterval(autoUpdateTimer);
+    stopPromise = (async () => {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
       await app.manager.shutdown();
       await app.mcp.closeAll();
       app.logger.info("server.stopped", {});
     })();
+    return stopPromise;
+  };
+
+  if (autoUpdateEnabled && isCompiledBinary() && Number.isFinite(autoUpdatePollMs) && autoUpdatePollMs > 0) {
+    const maybeAutoUpdate = (): void => {
+      if (stopping) return;
+      const u = lastUpdateCheck();
+      if (!u) return; // nothing newer known yet — the daily check will find it
+      const c = app.manager.counts();
+      if (c.queued > 0 || c.running > 0) return; // busy — try again next poll
+      app.logger.info("auto_update.preparing", { current: u.current, latest: u.latest });
+      void prepareUpdate().then(
+        (prepared) => {
+          // Re-checked busy-ness is pointless here (the download itself can
+          // take a while and a task could have started), but the install
+          // phase below is what actually stops the server, so check once
+          // more right before committing to it.
+          if (!prepared || stopping) return;
+          const c2 = app.manager.counts();
+          if (c2.queued > 0 || c2.running > 0) return;
+          app.logger.info("auto_update.installing", { current: prepared.rel.current, latest: prepared.rel.latest });
+          void stopServing("auto-update").then(() => installUpdate(prepared, { respawn: !process.env.WRONGFORGE_SUPERVISED_CHILD }));
+        },
+        (e) => app.logger.warn("auto_update.prepare_failed", { error: (e as Error).message }), // network hiccup — nothing was torn down, try again next poll
+      );
+    };
+    autoUpdateTimer = setInterval(maybeAutoUpdate, autoUpdatePollMs);
+    autoUpdateTimer.unref();
+  }
+
+  const shutdown = (signal = "shutdown"): void => {
+    void stopServing(signal).then(() => process.exit(0));
     setTimeout(() => process.exit(0), 20_000).unref(); // never hang on exit
   };
   process.on("SIGINT", () => shutdown("SIGINT"));
