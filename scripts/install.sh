@@ -106,3 +106,27 @@ echo "✓ installed: $DEST/$command_name"
 "$DEST/$command_name" version
 echo "✓ PATH configured for bash, zsh and fish; open a new terminal to run wrongforge anywhere"
 echo "  To use it in this terminal now: $path_line"
+
+# OAuth client config: deliberately not embedded in the binary (no
+# identifiers hardcoded in the source — see src/config.ts) and not written
+# by `wrongforge import` either, so a clean install otherwise has no way to
+# refresh its token until someone manually runs `npm run config:init` (a
+# source-only command) or hand-copies oauth.config.example.json. Write it
+# from that same public, repo-tracked template here, once — a failure here
+# never fails the install, since the CLI falls back to CLAUDE_OAUTH_* env
+# vars.
+cfg_dir="${WRONGFORGE_HOME:-$HOME/.wrongforge}"
+cfg_file="$cfg_dir/oauth.json"
+if [ ! -f "$cfg_file" ]; then
+  mkdir -p "$cfg_dir" 2>/dev/null || true
+  if curl -fsSL --max-time 15 -o "$cfg_file.tmp" \
+      "https://raw.githubusercontent.com/${REPO}/main/oauth.config.example.json" 2>/dev/null \
+      && [ -s "$cfg_file.tmp" ]; then
+    mv "$cfg_file.tmp" "$cfg_file"
+    chmod 600 "$cfg_file" 2>/dev/null || true
+    echo "✓ OAuth client config: $cfg_file"
+  else
+    rm -f "$cfg_file.tmp"
+    echo "!! could not write the OAuth client config ($cfg_file) — set CLAUDE_OAUTH_CLIENT_ID, or run \`wrongforge import\`/\`login\` once you have one" >&2
+  fi
+fi

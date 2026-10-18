@@ -6,6 +6,28 @@ package.json and the git tags that drive the release workflow.
 
 ## [Unreleased]
 
+### Fixed
+- **`wrongforge update` (and `WRONGFORGE_AUTO_UPDATE`) always refused to run**
+  with "self-update replaces the compiled binary" — on every binary, every
+  platform, since the feature shipped (GitHub issue #2). `isCompiledBinary()`
+  also required `process.argv[0]` to contain `"wrongforge"`, but in a Bun
+  `--compile` executable `argv[0]` is always the fixed string `"bun"` (the
+  runtime name), never the executable's own path — confirmed by compiling
+  and running a real binary. Fixed by dropping that check; `process.execPath`
+  (the real on-disk path) was already reliable on its own. Verified against
+  both a freshly-compiled local binary and a real published release.
+- **A clean binary install had no way to refresh its OAuth token**
+  (`OAuth client is not configured`, `wrongforge status` showing
+  `clientConfigured: false` — GitHub issue #4): `scripts/install.sh` /
+  `install.ps1` only ever installed the binary, never the OAuth client
+  config (`npm run config:init`, the only existing way to create it, is
+  source-only). Both installers now write `~/.wrongforge/oauth.json` (or
+  `install.ps1`'s `%USERPROFILE%\.wrongforge\oauth.json`, respecting
+  `WRONGFORGE_HOME`) from the repo's public `oauth.config.example.json` when
+  it doesn't already exist — client identifiers still live outside the
+  source (no policy change), the installer just automates the copy. A
+  failed download never fails the install.
+
 ## [0.4.8] — 2026-10-19
 
 ### Added

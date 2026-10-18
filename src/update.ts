@@ -122,11 +122,23 @@ export function setIsCompiledBinaryForTest(v: boolean | null): void {
   isCompiledBinaryOverride = v;
 }
 
-/** True when running as a compiled executable (self-update only then). */
+/**
+ * True when running as a compiled executable (self-update only then).
+ *
+ * Only checks `process.execPath` — the real on-disk path of the running
+ * binary, confirmed reliable by compiling and running an actual `bun build
+ * --compile` executable. An earlier version also required
+ * `process.argv[0]?.includes("wrongforge")`, which made this ALWAYS false:
+ * in a Bun single-file executable, `argv[0]` is the fixed string `"bun"`
+ * (the runtime name), never the executable's own path — confirmed the same
+ * way, and live against a real published release binary (GitHub issue #2).
+ * That made every self-update path — the CLI's own `wrongforge update` and
+ * the server's `WRONGFORGE_AUTO_UPDATE` — permanently refuse to run.
+ */
 export function isCompiledBinary(): boolean {
   if (isCompiledBinaryOverride !== null) return isCompiledBinaryOverride;
   const exec = process.execPath.toLowerCase();
-  return exec.includes("wrongforge") && !exec.includes("node_modules") && process.argv[0]?.toLowerCase().includes("wrongforge");
+  return exec.includes("wrongforge") && !exec.includes("node_modules");
 }
 
 export interface SelfUpdateOptions {

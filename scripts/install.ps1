@@ -83,6 +83,27 @@ namespace WrongForge {
   if ($LASTEXITCODE -ne 0) { throw "Installed wrongforge failed its version check (exit $LASTEXITCODE)" }
   Write-Host "+ ready: wrongforge (current terminal and future terminals)"
   Write-Host "note: other already-open terminals may need restarting to refresh PATH"
+
+  # OAuth client config: deliberately not embedded in the binary (no
+  # identifiers hardcoded in the source) and not written by `wrongforge
+  # import` either, so a clean install otherwise has no way to refresh its
+  # token until someone hand-copies oauth.config.example.json. Write it from
+  # that same public, repo-tracked template here, once — a failure here
+  # never fails the install, since the CLI falls back to CLAUDE_OAUTH_* env
+  # vars.
+  $cfgDir = if ($env:WRONGFORGE_HOME) { $env:WRONGFORGE_HOME } else { "$env:USERPROFILE\.wrongforge" }
+  $cfgFile = "$cfgDir\oauth.json"
+  if (-not (Test-Path $cfgFile)) {
+    try {
+      New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null
+      Invoke-WebRequest -Uri "https://raw.githubusercontent.com/$Repo/main/oauth.config.example.json" -OutFile "$cfgFile.tmp"
+      Move-Item "$cfgFile.tmp" $cfgFile -Force
+      Write-Host "+ OAuth client config: $cfgFile"
+    } catch {
+      Remove-Item "$cfgFile.tmp" -ErrorAction SilentlyContinue
+      Write-Host "!! could not write the OAuth client config ($cfgFile) - set CLAUDE_OAUTH_CLIENT_ID, or run 'wrongforge import' / 'login' once you have one"
+    }
+  }
 } finally {
   Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
 }
