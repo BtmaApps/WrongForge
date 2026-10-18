@@ -6,6 +6,8 @@ package.json and the git tags that drive the release workflow.
 
 ## [Unreleased]
 
+## [0.4.5] — 2026-10-18
+
 ### Added
 - **Dashboard "Proxy" tab**: live visibility into every call to the
   Anthropic-compatible endpoint (`/v1/messages`, `/v1/messages/count_tokens`,
