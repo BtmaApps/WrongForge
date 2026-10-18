@@ -294,8 +294,15 @@ export class ClaudeOAuth {
     };
   }
 
-  /** Builds the authorize URL with PKCE + state (client_id first — the safest
-   *  position when the URL is partially copied from a terminal). */
+  /**
+   * Builds the authorize URL with PKCE + state (client_id first — the safest
+   * position when the URL is partially copied from a terminal). Carries
+   * `code=true` because the live backend scopes the grant down when it is
+   * absent (carved from CC 2.1.300's own authorize-URL builder, `WPr` in
+   * mod-0150: it always sends this flag; see re/notes/findings.md §12 —
+   * a community report of a refresh token that came back with only
+   * `user:profile`, missing `user:inference`, traces to this).
+   */
   buildAuthorizeUrl(
     codeChallenge: string,
     state: string,
@@ -304,6 +311,7 @@ export class ClaudeOAuth {
   ): string {
     const u = new URL(this.requireConfig().authorizeUrl);
     u.searchParams.set("client_id", this.requireConfig().clientId);
+    u.searchParams.set("code", "true");
     u.searchParams.set("response_type", "code");
     u.searchParams.set("redirect_uri", redirectUri);
     u.searchParams.set("scope", scope);

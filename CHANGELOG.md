@@ -6,6 +6,22 @@ package.json and the git tags that drive the release workflow.
 
 ## [Unreleased]
 
+## [0.4.4] — 2026-10-18
+
+### Fixed
+- **Login grant scope narrowed without `code=true`** (issue #3, community
+  report + `re/notes/findings.md` §12): the authorize-URL request was missing
+  a parameter Claude Code always sends (`code=true`), carved from CC 2.1.300's
+  own builder. Without it the granted scope could come back missing
+  `user:inference` (model calls then fail even though sign-in looked fine).
+  Added; the OAuth client (console/subscription) endpoint choice itself was
+  already correct — confirmed scope selection is unrelated to the host.
+- `src/oauth.ts`'s outdated note claiming `api.anthropic.com` rejects the
+  token-endpoint request shape is removed — independently probe-verified by a
+  community report that it currently accepts it (any User-Agent). WrongForge
+  keeps targeting `platform.claude.com` (Claude Code's own `TOKEN_URL`) rather
+  than relying on that undocumented leniency.
+
 ## [0.4.3] — 2026-10-18
 
 ### Added
