@@ -169,12 +169,14 @@ disables the colors; `WRONGFORGE_LIVE=0` turns it off).
 
 **Live dashboard** — open `http://127.0.0.1:8787/` while the server runs
 (embedded in the binary; from source, `npm run webui:build` once). One screen,
-four tabs: **Overview** (the control room above — task rail, live feed,
+five tabs: **Overview** (the control room above — task rail, live feed,
 inspector), **Insights** (per-model usage and outcomes, tool activity),
-**Sessions** and **Info** (models with their effort levels, plan usage, limits,
-tools, storage). The feed replays its backlog on connect — the last ≤300 HTTP
-requests AND the newest ≤300 task events **from disk**, so it survives serve
-restarts and shows what ran while you were away. Buttons on the feed run a
+**Sessions**, **Info** (models with their effort levels, plan usage, limits,
+tools, storage) and **Proxy** (live request/response traffic through the
+Anthropic-compatible endpoint below — see that section). The feed replays its
+backlog on connect — the last ≤300 HTTP requests AND the newest ≤300 task
+events **from disk**, so it survives serve restarts and shows what ran while
+you were away. Buttons on the feed run a
 test request or a tiny test task on demand; running tasks can be cancelled
 from the rail. The browser asks for the server API key once (`?key=` on the
 URL also works — browsers cannot set headers on EventSource); only the shell
@@ -216,7 +218,7 @@ is what leaves your machine:
 
 | Request | Contents |
 |---|---|
-| authorize URL | `client_id` (from your config), `redirect_uri`, `scope`, one-time PKCE `code_challenge` + `state` |
+| authorize URL | `client_id` (from your config), `code=true` (the flag Claude Code's own client always sends — omitting it can narrow the granted scope), `redirect_uri`, `scope`, one-time PKCE `code_challenge` + `state` |
 | token endpoint | `grant_type`, `client_id`, `code` / `refresh_token`, `redirect_uri`, `code_verifier`, `scope` (JSON body) |
 | `POST /v1/messages` | `Authorization: Bearer <token>`, `anthropic-version`, the beta list below, the conversation, the tool definitions, and the identification described next |
 | `GET /api/hello` | startup liveness ping, no auth (as Claude Code does) |
@@ -518,6 +520,8 @@ src/provider.ts    Anthropic client; oauthFetch injects Bearer + Claude Code cli
                    signature, system blocks, cache breakpoints; refresh-on-401
 src/agent.ts       runAgentTurn(): streams /v1/messages, runs tool_use blocks
                    locally, loops until the model stops or maxSteps is reached
+src/proxy.ts       Anthropic-compatible proxy (/v1/messages, /v1/models) —
+                   mirrors oauthFetch's client signature for proxied clients
 src/tools/         bash read write edit ls glob grep web_fetch todo report mcp gateway
 src/mcp/           MCP config store (mcp.json) + pooled client registry
 src/tasks/         TaskManager (queue, lifecycle, recovery), TaskStore (disk),
