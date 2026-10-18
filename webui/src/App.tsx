@@ -17,6 +17,7 @@ import { Inspector } from "./components/Inspector.js";
 import { SessionsView } from "./components/SessionsView.js";
 import { InsightsView } from "./components/InsightsView.js";
 import { InfoView } from "./components/InfoView.js";
+import { ProxyView } from "./components/ProxyView.js";
 
 export default function App() {
   const conn = useStore((s) => s.conn);
@@ -75,6 +76,9 @@ export default function App() {
               <Tabs.Trigger value="info" className="tabs-trigger">
                 Info
               </Tabs.Trigger>
+              <Tabs.Trigger value="proxy" className="tabs-trigger">
+                Proxy
+              </Tabs.Trigger>
             </Tabs.List>
             <Tabs.Content value="overview" className="tabs-content">
               <div className="overview">
@@ -91,6 +95,9 @@ export default function App() {
             </Tabs.Content>
             <Tabs.Content value="info" className="tabs-content">
               <InfoView />
+            </Tabs.Content>
+            <Tabs.Content value="proxy" className="tabs-content">
+              <ProxyView />
             </Tabs.Content>
           </Tabs.Root>
         )}

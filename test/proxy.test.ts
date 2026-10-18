@@ -131,7 +131,172 @@ async function main(): Promise<void> {
     await h.close();
   }
 
-  console.log("PROXY TESTS PASSED ✓ (auth via x-api-key, JSON/SSE/error passthrough, CC costume in OAuth mode, pure passthrough in api-key mode, count_tokens/models, client abort, disable switch)");
+  // ============================================= proxy.call dashboard events
+  {
+    const h = await startHarness();
+
+    /** Opens /v1/events and accumulates raw SSE text until `ac.abort()`. */
+    const openFeed = (): { ac: AbortController; text: { out: string }; done: Promise<void> } => {
+      const ac = new AbortController();
+      const text = { out: "" };
+      const done = (async () => {
+        const res = await fetch(`${h.base}/v1/events?key=${h.key}`, { headers: { Accept: "text/event-stream" }, signal: ac.signal });
+        const reader = res.body!.getReader();
+        const dec = new TextDecoder();
+        try {
+          for (;;) {
+            const { value, done: ended } = await reader.read();
+            if (ended) break;
+            text.out += dec.decode(value, { stream: true });
+          }
+        } catch {
+          /* aborted — the normal end of this check */
+        }
+      })();
+      return { ac, text, done };
+    };
+
+    /** The `proxy.call` frame whose request body carries `marker` — never the
+     * stale previous one: the ring buffer's backlog replay means a fresh SSE
+     * connection can already see an OLDER matching-path call before the
+     * NEW one has landed, so matching on "last by path" alone is unsafe —
+     * each sub-test uses a unique prompt fragment to pick out its own call.
+     * request_body is the parsed object for a small body, or a raw (possibly
+     * truncated) string once the request itself exceeds the tap's cap —
+     * both shapes are checked so an over-cap request still matches. */
+    const findProxyCall = (out: string, marker: string): any => {
+      for (const block of parseSse(out)) {
+        if (block.event !== "proxy.call") continue;
+        const req = block.data?.request_body;
+        const content = typeof req === "string" ? req : req?.messages?.[0]?.content;
+        if (typeof content === "string" && content.includes(marker)) return block.data;
+      }
+      return null;
+    };
+
+    const post = (path: string, body: string, headers: Record<string, string> = {}) =>
+      fetch(`${h.base}${path}`, { method: "POST", headers: { "Content-Type": "application/json", ...headers }, body });
+
+    {
+      const feed = openFeed();
+      await sleep(150); // let the stream (and its tap) attach server-side
+      await post("/v1/messages", message("[[say mark-nonstream-reply]]"), { "x-api-key": h.key });
+      let call: any = null;
+      for (let i = 0; i < 50 && !call; i++) {
+        call = findProxyCall(feed.text.out, "mark-nonstream-reply");
+        if (!call) await sleep(100);
+      }
+      feed.ac.abort();
+      await feed.done;
+      assert(call, "a non-stream /v1/messages call produces a proxy.call event");
+      assert(call.method === "POST" && call.status === 200 && call.auth_mode === "oauth", "proxy.call carries method/status/auth_mode");
+      assert(call.model === "claude-sonnet-5-5" && call.stream !== true, "proxy.call extracts model/stream from the request");
+      assert(call.request_body?.messages?.[0]?.content === "[[say mark-nonstream-reply]]", "proxy.call carries the parsed request body");
+      assert(typeof call.response_body === "object" && call.response_body?.content?.[0]?.text === "mark-nonstream-reply", "proxy.call carries the parsed response body");
+      assert(call.request_truncated === false && call.response_truncated === false, "small bodies are not truncated");
+      assert(typeof call.id === "string" && call.id.length > 0, "proxy.call carries a stable id");
+    }
+
+    // streaming: exactly one proxy.call, emitted once the upstream SSE body
+    // has fully drained, carrying the captured raw SSE text
+    {
+      const feed = openFeed();
+      await sleep(150);
+      const r = await post("/v1/messages", message("[[say mark-stream-reply]]", { stream: true }), { "x-api-key": h.key });
+      assert(r.status === 200, "streaming call succeeds");
+      await r.text(); // drain the client-side body before asserting on the tap
+      let call: any = null;
+      for (let i = 0; i < 50 && !call; i++) {
+        call = findProxyCall(feed.text.out, "mark-stream-reply");
+        if (!call) await sleep(100);
+      }
+      feed.ac.abort();
+      await feed.done;
+      assert(call, "a streaming /v1/messages call also produces a proxy.call event");
+      assert(call.stream === true, "proxy.call reflects stream:true");
+      assert(typeof call.response_body === "string" && call.response_body.includes("mark-stream-reply"), "proxy.call captures the raw SSE response text");
+    }
+
+    // failures still show up (status >= 400), so "what went wrong" is visible too
+    {
+      const feed = openFeed();
+      await sleep(150);
+      await post("/v1/messages", message("[[fail 429 mark-fail-429]]"), { "x-api-key": h.key });
+      let call: any = null;
+      for (let i = 0; i < 50 && !call; i++) {
+        call = findProxyCall(feed.text.out, "mark-fail-429");
+        if (!call) await sleep(100);
+      }
+      feed.ac.abort();
+      await feed.done;
+      assert(call?.status === 429, "an upstream failure still produces a proxy.call event, with its real status");
+    }
+
+    // truncation: a response far larger than a small (256-byte) cap is marked
+    // truncated in the tap event — AND the real client still gets it in full,
+    // proving the capped capture never touches the actual response to the
+    // caller. Scoped to just this sub-test so the other assertions above/below
+    // keep using the default (8 KB) cap, large enough to hold a whole reply.
+    {
+      process.env.WRONGFORGE_PROXY_TAP_BODY_CAP = "256";
+      const longText = "mark-trunc-" + "x".repeat(2000);
+      const feed = openFeed();
+      await sleep(150);
+      const r = await post("/v1/messages", message(`[[say ${longText}]]`), { "x-api-key": h.key });
+      const clientBody = await r.json();
+      assert(clientBody.content[0].text === longText, "the real client receives the full, untruncated response");
+      let call: any = null;
+      for (let i = 0; i < 50 && !call; i++) {
+        call = findProxyCall(feed.text.out, "mark-trunc-");
+        if (!call) await sleep(100);
+      }
+      feed.ac.abort();
+      await feed.done;
+      delete process.env.WRONGFORGE_PROXY_TAP_BODY_CAP;
+      assert(call, "the over-cap call still produces a matching proxy.call event");
+      assert(call.request_truncated === true, "an over-cap request is marked truncated too");
+      assert(call.response_truncated === true, "the dashboard tap marks an over-cap response as truncated");
+      assert(typeof call.response_body === "string" && call.response_body.length <= 256, "the tap's own copy stays within its cap, independent of the real response");
+    }
+
+    // api_key mode: auth_mode flips, no behavior change otherwise
+    {
+      process.env.ANTHROPIC_API_KEY = "sk-ant-test-0123456789";
+      const feed = openFeed();
+      await sleep(150);
+      await post("/v1/messages", message("[[say mark-apikey-reply]]"), { "x-api-key": h.key });
+      let call: any = null;
+      for (let i = 0; i < 50 && !call; i++) {
+        call = findProxyCall(feed.text.out, "mark-apikey-reply");
+        if (!call) await sleep(100);
+      }
+      feed.ac.abort();
+      await feed.done;
+      delete process.env.ANTHROPIC_API_KEY;
+      assert(call?.auth_mode === "api_key", "proxy.call reflects api_key mode");
+    }
+
+    // backlog replay: a late-connecting dashboard still sees recent proxy.call
+    // frames, same guarantee as http.request's backlog
+    {
+      await post("/v1/messages", message("[[say mark-backlog-reply]]"), { "x-api-key": h.key });
+      await sleep(200); // let the tap land before the late connection opens
+      const feed = openFeed();
+      let call: any = null;
+      for (let i = 0; i < 20 && !call; i++) {
+        call = findProxyCall(feed.text.out, "mark-backlog-reply");
+        if (!call) await sleep(100);
+      }
+      feed.ac.abort();
+      await feed.done;
+      assert(call, "a dashboard connecting after the call still sees it via backlog replay");
+    }
+
+    delete process.env.WRONGFORGE_PROXY_TAP_BODY_CAP;
+    await h.close();
+  }
+
+  console.log("PROXY TESTS PASSED ✓ (auth via x-api-key, JSON/SSE/error passthrough, CC costume in OAuth mode, pure passthrough in api-key mode, count_tokens/models, client abort, disable switch, proxy.call dashboard events + truncation + backlog)");
 }
 
 main().then(

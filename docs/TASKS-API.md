@@ -307,6 +307,16 @@ status, duration_ms }` for every `/v1` call as it completes (the stream itself
 excluded). They are fire-and-forget, never persisted, so the dashboard can show
 incoming traffic even while no task is running.
 
+It also carries `proxy.call` frames — one per call to the Anthropic-compatible
+endpoint (`/v1/messages`, `/v1/messages/count_tokens`, `/v1/models`, see
+README § Anthropic-compatible endpoint): `{ type, id, ts, method, path,
+status, duration_ms, auth_mode, model?, stream?, request_body?,
+request_truncated, response_body?, response_truncated }`. `request_body` and
+`response_body` are size-capped copies for display (`WRONGFORGE_PROXY_TAP_BODY_CAP`,
+default 8 KB) — truncation never affects what the real client exchanged, only
+how much of it the dashboard's "Proxy" tab shows. Backlog ≤150 frames, same
+fire-and-forget, never-persisted contract as `http.request`.
+
 ## Webhooks
 
 With `callback: { "url": "https://…", "events": ["task.*", "tool.*"] }` the

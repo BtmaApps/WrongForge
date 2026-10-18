@@ -9,10 +9,11 @@
 
 import { useSyncExternalStore } from "react";
 import { api, connectEvents, saveKey, type SseStatus } from "./api.js";
-import type { Info, PlanUsage, SessionMeta, TaskEvent, TaskRecord, TokenUsage } from "./types.js";
+import type { Info, PlanUsage, ProxyCall, SessionMeta, TaskEvent, TaskRecord, TokenUsage } from "./types.js";
 
 const FEED_CAP = 1200;
 const PER_TASK_CAP = 600;
+const PROXY_CALLS_CAP = 300;
 
 export interface FeedRow {
   key: string;
@@ -57,6 +58,9 @@ export interface State {
   tasks: Map<string, TaskRecord>;
   sessions: SessionMeta[];
   feed: FeedRow[];
+  /** The "Proxy" tab's own feed: /v1/messages-surface calls, kept out of
+   *  `feed` so their (potentially large) bodies never ride the task firehose. */
+  proxyCalls: ProxyCall[];
   perTask: Map<string, TaskEvent[]>;
   tools: Map<string, ToolStat>;
   totals: Totals;
@@ -80,6 +84,7 @@ const initial: State = {
   tasks: new Map(),
   sessions: [],
   feed: [],
+  proxyCalls: [],
   perTask: new Map(),
   tools: new Map(),
   totals: { steps: 0, requests: 0, toolCalls: 0, in: 0, out: 0, cacheRead: 0 },
@@ -107,6 +112,9 @@ class Store {
   /** Same, for http.request frames: they carry no id and the server replays
    * the whole tap log to every reconnect, so they are keyed by their tuple. */
   private tapKeys = new Set<string>();
+  /** proxy.call frames DO carry a server-assigned id, so dedup here is exact
+   *  (no tuple-hash heuristic needed, unlike tapKeys above). */
+  private proxyCallIds = new Set<string>();
 
   private static readonly TAP_KEY_CAP = 600;
   private static readonly TASK_SEQ_CAP = 5_000;
@@ -177,6 +185,7 @@ class Store {
       key,
       (ev) => {
         if (ev.type === "http.request") this.applyHttp(ev as unknown as Parameters<Store["applyHttp"]>[0]);
+        else if (ev.type === "proxy.call") this.applyProxyCall(ev as unknown as ProxyCall);
         else this.applyEvent(ev);
       },
       (s, detail) => {
@@ -400,6 +409,19 @@ class Store {
           last: { method, path, status, duration_ms: duration, at },
         },
       };
+    });
+  }
+
+  /** proxy.call frame as the server sends it — flat, no TaskEvent envelope,
+   *  same spirit as applyHttp() above but routed to its own `proxyCalls`
+   *  list (kept out of the task firehose; see State.proxyCalls). */
+  private applyProxyCall(e: ProxyCall): void {
+    if (!this.remember(this.proxyCallIds, e.id)) return; // already replayed via the backlog
+    const at = Date.parse(e.ts) || Date.now();
+    this.set((s) => {
+      const calls = [...s.proxyCalls, e];
+      calls.sort((a, b) => Date.parse(a.ts) - Date.parse(b.ts));
+      return { proxyCalls: calls.slice(-PROXY_CALLS_CAP), lastActivityAt: Math.max(s.lastActivityAt, at) };
     });
   }
 

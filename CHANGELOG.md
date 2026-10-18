@@ -6,6 +6,18 @@ package.json and the git tags that drive the release workflow.
 
 ## [Unreleased]
 
+### Added
+- **Dashboard "Proxy" tab**: live visibility into every call to the
+  Anthropic-compatible endpoint (`/v1/messages`, `/v1/messages/count_tokens`,
+  `/v1/models`) — method, model, `stream`/`auth_mode`, status, duration, and
+  the request/response bodies themselves (expandable). Fed by a new
+  `proxy.call` SSE channel on `GET /v1/events`, kept separate from the task
+  event firehose so its (larger) bodies never crowd it out. Capturing a
+  response never buffers or delays what the real client receives — it mirrors
+  a size-capped copy alongside the untouched pass-through pipe
+  (`WRONGFORGE_PROXY_TAP_BODY_CAP`, default 8 KB; independent of
+  `WRONGFORGE_PROXY_MAX_BODY`, which bounds what the proxy itself accepts).
+
 ## [0.4.4] — 2026-10-18
 
 ### Fixed

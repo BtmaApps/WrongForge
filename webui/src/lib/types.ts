@@ -63,6 +63,29 @@ export interface TaskEvent {
   data: Record<string, unknown>;
 }
 
+/** One captured /v1/messages-surface call (the "Proxy" tab), as the server's
+ * `proxy.call` SSE frame sends it — a dedicated channel, separate from
+ * TaskEvent/http.request, so its (potentially large) bodies never ride the
+ * main task firehose. Bodies are size-capped copies for display; `_truncated`
+ * marks a body that was cut (the real request/response the client exchanged
+ * is always the untouched one — this is a UI-only capture). */
+export interface ProxyCall {
+  type: "proxy.call";
+  id: string;
+  ts: string;
+  method: string;
+  path: string;
+  status: number;
+  duration_ms: number;
+  auth_mode: "oauth" | "api_key";
+  model?: string;
+  stream?: boolean;
+  request_body?: unknown;
+  request_truncated: boolean;
+  response_body?: unknown;
+  response_truncated: boolean;
+}
+
 export interface SessionMeta {
   id: string;
   created_at: string;

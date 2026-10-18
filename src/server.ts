@@ -33,7 +33,7 @@ import { DEFAULT_MODEL, KNOWN_MODELS } from "./agent.js";
 import { effortSupport } from "./effort.js";
 import { APP_NAME, VERSION, dataDir } from "./paths.js";
 import { resolveApiKey } from "./apikey.js";
-import { createProxyHandler, proxyEnabled, proxyMaxBody } from "./proxy.js";
+import { createProxyHandler, proxyEnabled, proxyMaxBody, type ProxyCallEvent } from "./proxy.js";
 import { printBanner } from "./banner.js";
 import { loadPromptFiles } from "./prompt.js";
 import { SubmitError } from "./tasks/manager.js";
@@ -132,7 +132,6 @@ export function createAgentServer(opts: ServerOptions): http.Server {
   const manager = app.manager;
   const keyBuf = Buffer.from(opts.apiKey);
   const webuiDir = opts.webuiDir ?? DEFAULT_WEBUI_DIR;
-  const proxy = createProxyHandler({ oauth, logger: app.logger });
 
   const webuiBuilt = (): boolean => {
     try {
@@ -157,6 +156,23 @@ export function createAgentServer(opts: ServerOptions): http.Server {
     if (httpTapLog.length > HTTP_TAP_LOG_CAP) httpTapLog.splice(0, httpTapLog.length - HTTP_TAP_LOG_CAP);
     for (const t of httpTaps) t(e);
   };
+
+  /**
+   * Second, parallel tap channel for the dashboard's "Proxy" tab: full
+   * request/response bodies for /v1/messages-surface calls (src/proxy.ts),
+   * broadcast through the same /v1/events feed. Kept separate from
+   * httpTaps/httpTapLog above (lighter, header-only) so a heavier, rarer
+   * payload never bloats the hot-path HTTP tap or its backlog replay.
+   */
+  const proxyTaps = new Set<(e: ProxyCallEvent) => void>();
+  const proxyTapLog: ProxyCallEvent[] = [];
+  const PROXY_TAP_LOG_CAP = 150;
+  const recordProxyTap = (e: ProxyCallEvent): void => {
+    proxyTapLog.push(e);
+    if (proxyTapLog.length > PROXY_TAP_LOG_CAP) proxyTapLog.splice(0, proxyTapLog.length - PROXY_TAP_LOG_CAP);
+    for (const t of proxyTaps) t(e);
+  };
+  const proxy = createProxyHandler({ oauth, logger: app.logger, onTap: recordProxyTap });
   // serve-console live view (TTY-gated, see liveview.ts): every request and
   // event as one line on stdout, right where `npm run serve` runs
   startLiveView({ events: manager, httpTaps });
@@ -487,6 +503,9 @@ export function createAgentServer(opts: ServerOptions): http.Server {
     // what ran while it was away. Everything below is synchronous — no live
     // frame can fall into the gap before the subscriptions attach.
     for (const e of httpTapLog) if (!filtered) res.write(`event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`);
+    // proxy.call frames carry no task_id/session_id either — same unfiltered-
+    // only rule as http.request above.
+    for (const e of proxyTapLog) if (!filtered) res.write(`event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`);
     for (const ev of manager.recentEvents()) if (keep(ev)) res.write(`event: ${ev.type}\ndata: ${JSON.stringify(ev)}\n\n`);
     const unsub = manager.subscribe((ev) => {
       if (!keep(ev)) return;
@@ -501,10 +520,18 @@ export function createAgentServer(opts: ServerOptions): http.Server {
       res.write(`event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`);
     };
     httpTaps.add(tap);
+    // live proxy-call traffic for the dashboard's "Proxy" tab — same shape
+    // of fan-out, separate channel (see proxyTaps/proxyTapLog above).
+    const proxyTap = (e: ProxyCallEvent): void => {
+      if (res.writableEnded || filtered) return;
+      res.write(`event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`);
+    };
+    proxyTaps.add(proxyTap);
     const ping = setInterval(() => res.write(": ping\n\n"), 15_000);
     res.on("close", () => {
       unsub();
       httpTaps.delete(tap);
+      proxyTaps.delete(proxyTap);
       clearInterval(ping);
     });
   }

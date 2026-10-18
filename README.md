@@ -464,6 +464,14 @@ forwarded upstream. `WRONGFORGE_PROXY=0` turns the surface off;
 `WRONGFORGE_PROXY_MAX_BODY` caps request bodies (default 32 MB — the task
 API's 1 MB is too small for long contexts and inline images).
 
+**Watch it happen:** the dashboard's **Proxy** tab shows every call to this
+surface live — method, model, `stream`/`auth_mode`, status, duration, and the
+request/response bodies themselves (expandable). It is fed by its own
+`proxy.call` SSE channel (`docs/TASKS-API.md`), separate from the task
+firehose. Bodies shown there are a size-capped copy for display only
+(`WRONGFORGE_PROXY_TAP_BODY_CAP`, default 8 KB) — truncation there never
+touches what the real client actually exchanged.
+
 ## Sessions & context management
 
 A session (`session_id`) keeps the conversation across tasks; it is persisted
@@ -553,6 +561,7 @@ Environment variables (all optional unless noted):
 | `PORT` / `HOST` | Server listen port (8787) / address (127.0.0.1) |
 | `WRONGFORGE_PROXY` | Anthropic-compatible `/v1/messages` + `/v1/models` proxy surface (`0` disables; on by default) |
 | `WRONGFORGE_PROXY_MAX_BODY` | Proxy request body cap in bytes (32 MB) |
+| `WRONGFORGE_PROXY_TAP_BODY_CAP` | Dashboard "Proxy" tab's request/response body display cap in bytes (8 KB) — UI-only, independent of `WRONGFORGE_PROXY_MAX_BODY` |
 | `WRONGFORGE_HOME` | Data directory (default `~/.wrongforge`) |
 | `WRONGFORGE_LOG_DIR` / `_LOG_LEVEL` / `_LOG_STDERR` / `_LOG_MAX_MB` | Logging: dir, `debug\|info\|warn\|error`, mirror to stderr, daily-file size cap (50) |
 | `WRONGFORGE_MAX_CONCURRENCY` | Tasks running at once (2) |
