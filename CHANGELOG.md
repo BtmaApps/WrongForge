@@ -6,6 +6,8 @@ package.json and the git tags that drive the release workflow.
 
 ## [Unreleased]
 
+## [0.4.10] — 2026-10-19
+
 ### Added
 - **The Proxy tab now surfaces the detail a real debugging tool needs**:
   rate-limit headers (`anthropic-ratelimit-{requests,tokens}-{remaining,limit}`)
