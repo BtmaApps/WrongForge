@@ -92,10 +92,17 @@ export function summarizeAnthropicRequest(body: unknown): string {
   }
 }
 
+interface UsageLike {
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_creation_input_tokens?: number;
+  cache_read_input_tokens?: number;
+}
+
 interface ReconstructedMessage {
   content: unknown[];
   stop_reason?: string;
-  usage?: { input_tokens?: number; output_tokens?: number };
+  usage?: UsageLike;
 }
 
 /**
@@ -159,15 +166,49 @@ function reconstructFromSse(raw: string): ReconstructedMessage | null {
   return { content: blocks.filter(Boolean), stop_reason, usage };
 }
 
+/** Formats `in=X out=Y`, appending cache write/read token counts (the
+ *  clearest signal of whether prompt caching is actually hitting) whenever
+ *  the API reported either as nonzero. */
+function usageLine(u: UsageLike): string {
+  const base = `in=${u.input_tokens ?? "?"} out=${u.output_tokens ?? "?"}`;
+  const w = u.cache_creation_input_tokens ?? 0;
+  const r = u.cache_read_input_tokens ?? 0;
+  if (w === 0 && r === 0) return base;
+  return `${base} · cache +${w}w/${r}r`;
+}
+
+/** An Anthropic error envelope: `{type:"error", error:{type, message}}` (also
+ *  tolerates a bare `{error:{...}}` without the outer `type`, seen on some
+ *  non-2xx bodies). Checked before the message-shape parse below since an
+ *  error body has none of `content`/`stop_reason`/`usage`. */
+function errorSummary(body: unknown): string | null {
+  if (!body || typeof body !== "object") return null;
+  const err = (body as { error?: { type?: string; message?: string } }).error;
+  if (!err || typeof err !== "object") return null;
+  const type = err.type ?? "error";
+  const message = typeof err.message === "string" ? clip(err.message.replace(/\s+/g, " ").trim(), 140) : "";
+  return message ? `error: ${type} — ${message}` : `error: ${type}`;
+}
+
 export function summarizeAnthropicResponse(body: unknown, opts: { stream?: boolean } = {}): string {
   try {
     let msg: ReconstructedMessage;
     if (typeof body === "string") {
-      if (!opts.stream) return clip(body.replace(/\s+/g, " ").trim(), 100) || "raw";
+      if (!opts.stream) {
+        try {
+          const err = errorSummary(JSON.parse(body));
+          if (err) return err;
+        } catch {
+          /* not JSON — fall through to the plain-text clip below */
+        }
+        return clip(body.replace(/\s+/g, " ").trim(), 100) || "raw";
+      }
       const reconstructed = reconstructFromSse(body);
       if (!reconstructed) return "raw";
       msg = reconstructed;
     } else if (body && typeof body === "object") {
+      const err = errorSummary(body);
+      if (err) return err;
       const b = body as { content?: unknown[]; stop_reason?: string; usage?: ReconstructedMessage["usage"] };
       msg = { content: Array.isArray(b.content) ? b.content : [], stop_reason: b.stop_reason, usage: b.usage };
     } else {
@@ -175,7 +216,7 @@ export function summarizeAnthropicResponse(body: unknown, opts: { stream?: boole
     }
     const parts: string[] = [];
     if (msg.stop_reason) parts.push(`finish=${msg.stop_reason}`);
-    if (msg.usage) parts.push(`in=${msg.usage.input_tokens ?? "?"} out=${msg.usage.output_tokens ?? "?"}`);
+    if (msg.usage) parts.push(usageLine(msg.usage));
     const content = summarizeContentBlocks(msg.content);
     if (content) parts.push(content);
     return parts.join(" · ") || "raw";

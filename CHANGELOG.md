@@ -6,6 +6,18 @@ package.json and the git tags that drive the release workflow.
 
 ## [Unreleased]
 
+### Added
+- **The Proxy tab now surfaces the detail a real debugging tool needs**:
+  rate-limit headers (`anthropic-ratelimit-{requests,tokens}-{remaining,limit}`)
+  as a compact, color-warning chip on every call; the full request/response
+  header sets (one click away, including whichever `anthropic-beta` flags the
+  client itself sent and the upstream `request-id` for support tickets); error
+  responses now summarize as `error: <type> — <message>` instead of falling
+  back to a bare "raw" label; and the usage line shows prompt-cache
+  read/write token counts when present, not just input/output. All additive —
+  the real client's request/response bytes are untouched, this only extends
+  what the dashboard's own capped copy carries.
+
 ## [0.4.9] — 2026-10-19
 
 ### Fixed

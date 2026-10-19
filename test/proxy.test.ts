@@ -197,6 +197,30 @@ async function main(): Promise<void> {
       assert(typeof call.id === "string" && call.id.length > 0, "proxy.call carries a stable id");
     }
 
+    // request/response headers reach the dashboard tap too — the client's
+    // own anthropic-beta choice, and whatever rate-limit/request-id headers
+    // the upstream sent back (see FAKE_RATELIMIT_HEADERS in harness.ts)
+    {
+      const feed = openFeed();
+      await sleep(150);
+      await post("/v1/messages", message("[[say mark-headers-reply]]"), {
+        "x-api-key": h.key,
+        "anthropic-beta": "test-beta-flag-2099-01-01",
+      });
+      let call: any = null;
+      for (let i = 0; i < 50 && !call; i++) {
+        call = findProxyCall(feed.text.out, "mark-headers-reply");
+        if (!call) await sleep(100);
+      }
+      feed.ac.abort();
+      await feed.done;
+      assert(call, "a headers-bearing call produces a matching proxy.call event");
+      assert(call.request_headers?.["anthropic-beta"] === "test-beta-flag-2099-01-01", "proxy.call captures the client's anthropic-beta header");
+      assert(!("x-api-key" in (call.request_headers ?? {})), "the client's own WrongForge key never appears in request_headers");
+      assert(call.response_headers?.["anthropic-ratelimit-requests-remaining"] === "42", "proxy.call captures upstream rate-limit headers");
+      assert(call.response_headers?.["request-id"] === "req_fake_000000000000000000000", "proxy.call captures the upstream request-id");
+    }
+
     // streaming: exactly one proxy.call, emitted once the upstream SSE body
     // has fully drained, carrying the captured raw SSE text
     {
@@ -230,6 +254,7 @@ async function main(): Promise<void> {
       feed.ac.abort();
       await feed.done;
       assert(call?.status === 429, "an upstream failure still produces a proxy.call event, with its real status");
+      assert(call?.response_headers?.["anthropic-ratelimit-requests-remaining"] === "42", "response_headers are still captured on an upstream error (it did reach upstream)");
     }
 
     // truncation: a response far larger than a small (256-byte) cap is marked

@@ -120,6 +120,16 @@ export interface ProxyCallEvent {
   request_truncated: boolean;
   response_body?: unknown;
   response_truncated: boolean;
+  /** The subset of client request headers actually forwarded upstream
+   *  (FORWARD_REQUEST_HEADERS) — e.g. the anthropic-beta flags this
+   *  particular client asked for. Captured before credentials are injected,
+   *  so it never contains x-api-key. */
+  request_headers?: Record<string, string>;
+  /** The subset of upstream response headers forwarded back to the client
+   *  (FORWARD_RESPONSE_HEADERS plus the anthropic-* rule) — rate limits,
+   *  request-id, retry-after. Absent when the call never reached upstream
+   *  (e.g. 503 not_signed_in, 502 upstream_unreachable). */
+  response_headers?: Record<string, string>;
 }
 
 /** Parses a captured body string for display: small valid JSON becomes an
@@ -190,6 +200,8 @@ export function createProxyHandler(opts: ProxyOptions) {
     let requestBodyRaw: string | undefined;
     let parsedRequest: Record<string, unknown> | undefined;
     let authMode: "oauth" | "api_key" = "oauth";
+    let requestHeaders: Record<string, string> | undefined;
+    let responseHeaders: Record<string, string> | undefined;
 
     const emitTap = (status: number, responseRaw: string | undefined, responseTruncated: boolean): void => {
       if (!onTap) return;
@@ -211,6 +223,8 @@ export function createProxyHandler(opts: ProxyOptions) {
         request_truncated: req1.truncated,
         response_body: sanitize(res1.body, 1_000_000),
         response_truncated: res1.truncated,
+        request_headers: sanitize(requestHeaders, 2000) as Record<string, string> | undefined,
+        response_headers: sanitize(responseHeaders, 2000) as Record<string, string> | undefined,
       });
     };
 
@@ -239,6 +253,9 @@ export function createProxyHandler(opts: ProxyOptions) {
           /* not JSON — model/stream stay undefined, upstream will reject it */
         }
       }
+      // snapshot before credentials are injected below — x-api-key must
+      // never reach the tap, even redacted
+      requestHeaders = { ...headers };
 
       // the client owns the connection lifetime: when it walks away the
       // upstream request is aborted so nothing streams into a dead socket
@@ -262,6 +279,7 @@ export function createProxyHandler(opts: ProxyOptions) {
         if (FORWARD_RESPONSE_HEADERS.has(n) || n.startsWith("anthropic-")) out[n] = value;
       });
       out["content-type"] ??= "application/json";
+      responseHeaders = out;
       res.writeHead(upstream.status, out);
 
       if (!upstream.body) {

@@ -97,6 +97,18 @@ export const defaultScript: Script = (ctx) => {
   return { kind: "text", text: d.say ?? "ok", usage, delayMs: d.delay };
 };
 
+/** Every real Anthropic /v1/messages response carries these (success or
+ *  error) — fixed stand-ins so proxy.test.ts can assert the dashboard tap's
+ *  response_headers actually captures them, without the fake pretending to
+ *  track a real quota. */
+const FAKE_RATELIMIT_HEADERS: Record<string, string> = {
+  "anthropic-ratelimit-requests-limit": "50",
+  "anthropic-ratelimit-requests-remaining": "42",
+  "anthropic-ratelimit-tokens-limit": "20000",
+  "anthropic-ratelimit-tokens-remaining": "18100",
+  "request-id": "req_fake_000000000000000000000",
+};
+
 export class Fake {
   requests: { body: any; headers: http.IncomingHttpHeaders; n: number; method: string; url: string }[] = [];
   script: Script = defaultScript;
@@ -205,7 +217,7 @@ export class Fake {
     }
 
     if (reply.kind === "error") {
-      res.writeHead(reply.status, { "Content-Type": "application/json" });
+      res.writeHead(reply.status, { "Content-Type": "application/json", ...FAKE_RATELIMIT_HEADERS });
       res.end(JSON.stringify({ type: "error", error: { type: reply.status === 400 ? "invalid_request_error" : "api_error", message: reply.message } }));
       return;
     }
@@ -233,7 +245,7 @@ export class Fake {
     if (reply.kind === "tools") {
       reply.calls.forEach((c, i) => content.push({ type: "tool_use", id: `toolu_${n}_${i}`, name: c.name, input: c.input }));
     }
-    res.writeHead(200, { "Content-Type": "application/json" });
+    res.writeHead(200, { "Content-Type": "application/json", ...FAKE_RATELIMIT_HEADERS });
     res.end(
       JSON.stringify({
         id: `msg_${n}`, type: "message", role: "assistant", model: typeof model === "string" ? model : "fake",
@@ -246,7 +258,7 @@ export class Fake {
   private sse(res: http.ServerResponse, reply: Exclude<Reply, { kind: "error" }>, n: number): void {
     const w = (o: Record<string, unknown>): void => void res.write(`event: ${String(o.type)}\ndata: ${JSON.stringify(o)}\n\n`);
     const u = reply.usage ?? { input: 100, output: 20 };
-    res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" });
+    res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", ...FAKE_RATELIMIT_HEADERS });
     w({
       type: "message_start",
       message: {

@@ -84,6 +84,8 @@ export interface ProxyCall {
   request_truncated: boolean;
   response_body?: unknown;
   response_truncated: boolean;
+  request_headers?: Record<string, string>;
+  response_headers?: Record<string, string>;
 }
 
 export interface SessionMeta {
