@@ -43,6 +43,26 @@ async function main(): Promise<void> {
     assert(!JSON.stringify(up.headers).includes(h.key), "the client's WrongForge key never leaks upstream");
     assert(up.body.max_tokens === 100, "non-streaming max_tokens untouched");
 
+    // a proxy client's own earlier cache_control (its own growing
+    // conversation, buried in history) pins WrongForge's newly-added
+    // marker to match it, even though the server's own default is "1h" —
+    // otherwise Anthropic rejects the whole request with a ttl-ordering 400
+    {
+      const clientBody = JSON.stringify({
+        model: "claude-sonnet-5-5",
+        max_tokens: 100,
+        messages: [
+          { role: "user", content: [{ type: "text", text: "old turn", cache_control: { type: "ephemeral" } }] },
+          { role: "assistant", content: "ok" },
+          { role: "user", content: "[[say mark-pinned-ttl-reply]]" },
+        ],
+      });
+      await post("/v1/messages", clientBody, { "x-api-key": h.key });
+      const pinned = h.fake.requests.at(-1)!;
+      const newMarker = pinned.body.messages.at(-1).content.at(-1).cache_control;
+      assert(newMarker?.ttl === undefined, "the new marker is pinned to the client's own established 5m ttl, not the server's 1h default");
+    }
+
     // streaming request: SSE events pass through 1:1, CC costume applied
     const s = await post("/v1/messages", message("[[say streamed answer]]", { stream: true }), { "x-api-key": h.key });
     assert(s.status === 200 && (s.headers.get("content-type") ?? "").includes("text/event-stream"), "stream response is SSE");

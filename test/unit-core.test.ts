@@ -25,7 +25,7 @@ import {
   truncateToolOutput,
   CLEARED_PLACEHOLDER,
 } from "../src/compaction.js";
-import { applyCacheBreakpoints } from "../src/cache.js";
+import { applyCacheBreakpoints, defaultCacheMode } from "../src/cache.js";
 import {
   applyEffortToBody,
   clampEffort,
@@ -172,6 +172,46 @@ async function main(): Promise<void> {
   assert(applyCacheBreakpoints({}, "off") === 0 && applyCacheBreakpoints(null, "5m") === 0, "breakpoints: off / null");
   const bodyKeep = { system: [{ type: "text", text: "s", cache_control: { type: "ephemeral" } }], messages: [{ role: "user", content: [{ type: "text", text: "x", cache_control: { type: "ephemeral" } }] }] };
   assert(applyCacheBreakpoints(bodyKeep, "5m") === 2, "breakpoints: existing markers kept");
+
+  // an already-established ttl anywhere in the body (a proxy client's own
+  // earlier turn, buried in history) pins every NEW marker to match it —
+  // never introduces a second, conflicting ttl in one request (that's
+  // exactly what Anthropic rejects outright)
+  const bodyPinned5m = {
+    system: [{ type: "text", text: "s" }],
+    messages: [
+      { role: "user", content: [{ type: "text", text: "old turn", cache_control: { type: "ephemeral" } }] },
+      { role: "assistant", content: "ok" },
+      { role: "user", content: "new turn" },
+    ],
+  };
+  applyCacheBreakpoints(bodyPinned5m, "1h"); // server mode is 1h, but the conversation already established 5m
+  assert(
+    (bodyPinned5m.messages[2].content as { cache_control?: { ttl?: string } }[])[0].cache_control?.ttl === undefined,
+    "breakpoints: an established 5m ttl pins the new message marker to 5m even though mode=1h",
+  );
+  assert(
+    (bodyPinned5m.system[0] as { cache_control?: { ttl?: string } }).cache_control?.ttl === undefined,
+    "breakpoints: the system block's first-ever marker also honors the pinned 5m ttl",
+  );
+
+  const bodyPinned1h = {
+    system: [{ type: "text", text: "s" }],
+    messages: [
+      { role: "user", content: [{ type: "text", text: "old turn", cache_control: { type: "ephemeral", ttl: "1h" } }] },
+      { role: "assistant", content: "ok" },
+      { role: "user", content: "new turn" },
+    ],
+  };
+  applyCacheBreakpoints(bodyPinned1h, "5m"); // server mode is 5m, but the conversation already established 1h
+  assert(
+    (bodyPinned1h.messages[2].content as { cache_control?: { ttl?: string } }[])[0].cache_control?.ttl === "1h",
+    "breakpoints: an established 1h ttl pins the new message marker to 1h even though mode=5m",
+  );
+
+  assert(defaultCacheMode({ WRONGFORGE_CACHE: "5m" }) === "5m", "defaultCacheMode: reads WRONGFORGE_CACHE");
+  assert(defaultCacheMode({ WRONGFORGE_CACHE: "bogus" }) === "1h", "defaultCacheMode: falls back to 1h on an invalid value");
+  assert(defaultCacheMode({}) === "1h", "defaultCacheMode: falls back to 1h when unset");
 
   // ======================================================== messages conversion
   assert(toApiMessages([{ role: "user", content: "" }]).length === 0, "toApiMessages: empty string skipped");

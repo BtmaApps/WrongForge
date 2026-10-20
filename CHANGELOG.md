@@ -6,6 +6,23 @@ package.json and the git tags that drive the release workflow.
 
 ## [Unreleased]
 
+### Fixed
+- **A proxy client's own long-running conversation could get a `cache_control`
+  ttl-ordering 400 forever after** (`the API rejected cache_control — prompt
+  caching is disabled for this process`) — `applyCacheBreakpoints` always
+  marked the newest breakpoint with the server's *current* cache mode, but a
+  client pointed at WrongForge's `/v1/messages` proxy (`ANTHROPIC_BASE_URL`)
+  manages its own growing history, which can already carry a `cache_control`
+  with a different ttl than the server's default. Mixing ttls in one request
+  is exactly what Anthropic rejects outright, and the existing self-heal then
+  disabled caching process-wide (proxy calls have no session to scope the
+  disable to) for every client, not just the one that triggered it. Fixed by
+  scanning the body for an already-established ttl and pinning any new
+  marker to match it, rather than always using the server's current default.
+  WrongForge's own agent/task requests are unaffected (they're always built
+  cache_control-free from scratch, so this is a no-op there); the existing
+  self-heal remains in place as a last-resort safety net.
+
 ## [0.4.10] — 2026-10-19
 
 ### Added
