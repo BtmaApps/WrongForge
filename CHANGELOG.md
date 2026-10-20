@@ -6,6 +6,8 @@ package.json and the git tags that drive the release workflow.
 
 ## [Unreleased]
 
+## [0.4.11] — 2026-10-20
+
 ### Fixed
 - **A proxy client's own long-running conversation could get a `cache_control`
   ttl-ordering 400 forever after** (`the API rejected cache_control — prompt
