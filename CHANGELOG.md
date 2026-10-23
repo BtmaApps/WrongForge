@@ -6,6 +6,8 @@ package.json and the git tags that drive the release workflow.
 
 ## [Unreleased]
 
+## [0.4.12] — 2026-10-23
+
 ### Fixed
 - **A one-off transient write hiccup on a task's TERMINAL event (`task.completed` /
   `task.failed` / `task.cancelled` / `task.timed_out`) could silence that task
