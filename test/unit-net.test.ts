@@ -324,6 +324,45 @@ async function main(): Promise<void> {
   const pruned = store.prune(5, new Date(), new Set());
   assert(pruned.includes("s2") && !pruned.includes("s1"), "prune removes only old idle sessions");
 
+  // F603: appendTurn() must repair a dangling tool-call tail BEFORE writing,
+  // the same way load()/page() already repair one on read — otherwise
+  // message_count silently drifts from what every future load() returns
+  // (and GET /v1/sessions serializes that counter straight to callers).
+  store.create("f603-danger");
+  const danglingTurn: AgentMessage[] = [
+    { role: "user", content: "run two tools" },
+    {
+      role: "assistant",
+      content: [
+        { type: "tool-call", toolCallId: "call_1", toolName: "bash", input: { command: "echo hi" } },
+        { type: "tool-call", toolCallId: "call_2", toolName: "bash", input: { command: "echo bye" } },
+      ],
+    },
+    // no tool-result message follows — simulates a turn whose tool loop was
+    // interrupted between appending the assistant's tool_use blocks and
+    // recording their results.
+  ];
+  const f603meta = store.appendTurn("f603-danger", danglingTurn, { task_id: "f603-t1", model: "m", prompt: "run two tools" });
+  const f603loaded = store.load("f603-danger")!;
+  assert(f603meta.message_count === f603loaded.messages.length, "F603: message_count matches load() after a dangling-tail turn");
+  assert(f603loaded.messages.length === 1 && f603loaded.messages[0]!.role === "user", "F603: only the user message survived");
+  const f603raw = fs.readFileSync(path.join(sdir, "f603-danger", "messages.jsonl"), "utf8");
+  assert(!f603raw.includes("call_1"), "F603: the dangling tool-call never reached disk");
+  // a turn that is ONLY a dangling tail writes nothing and still counts the turn
+  store.create("f603-only-dangling");
+  const onlyDangling: AgentMessage[] = [{ role: "assistant", content: [{ type: "tool-call", toolCallId: "call_3", toolName: "read", input: {} }] }];
+  const f603metaOnly = store.appendTurn("f603-only-dangling", onlyDangling, { task_id: "f603-t2", model: "m", prompt: "p" });
+  assert(f603metaOnly.message_count === 0 && f603metaOnly.turns === 1, "F603: an all-dangling turn writes nothing but still counts as a turn");
+  // a complete tool-call/tool-result turn is untouched (no false-positive repair)
+  store.create("f603-healthy");
+  const completeTurn: AgentMessage[] = [
+    { role: "user", content: "run one tool" },
+    { role: "assistant", content: [{ type: "tool-call", toolCallId: "call_4", toolName: "bash", input: { command: "ls" } }] },
+    { role: "tool", content: [{ type: "tool-result", toolCallId: "call_4", toolName: "bash", output: { type: "text", value: "ok" } }] },
+  ];
+  const f603metaHealthy = store.appendTurn("f603-healthy", completeTurn, { task_id: "f603-t3", model: "m", prompt: "run one tool" });
+  assert(f603metaHealthy.message_count === 3 && store.load("f603-healthy")!.messages.length === 3, "F603: a complete tool-call/tool-result turn is never touched");
+
   // messages string branches
   assert(toApiMessages([{ role: "assistant", content: "plain" }])[0].content[0].type === "text", "assistant string content");
   assert(toApiMessages([{ role: "assistant", content: "" }]).length === 0, "assistant empty string skipped");

@@ -6,6 +6,21 @@ package.json and the git tags that drive the release workflow.
 
 ## [Unreleased]
 
+### Fixed
+- **A session turn that ended in an unanswered tool call could permanently
+  desync a session's reported `message_count` from what it would ever
+  actually return**, with no error and no log line. `SessionStore` already
+  repairs this exact shape on read (`load()`/`page()` both drop a dangling
+  assistant tool-call tail left by a crash mid-append), but `appendTurn()`
+  — the write boundary — trusted its caller completely and wrote such a
+  tail verbatim, bumping the counter as if nothing were wrong; the very
+  next read would then silently drop that message, leaving the counter
+  wrong forever (or until an unrelated compaction happened to recompute
+  it). `GET /v1/sessions` serializes that counter directly, so the drift
+  was externally visible. `appendTurn()` now applies the same repair
+  before writing, so the counter and the stored history can never
+  disagree.
+
 ## [0.4.12] — 2026-10-23
 
 ### Fixed

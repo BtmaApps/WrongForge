@@ -130,13 +130,23 @@ export class SessionStore {
   ): SessionMeta {
     const meta = this.readMeta(id);
     if (!meta) throw new Error(`no such session: ${id}`);
-    if (newMessages.length) {
+    // F603: repairTail() already proves a turn ending in an unanswered
+    // tool-call (e.g. the caller's own tool loop was interrupted between
+    // appending the assistant's tool_use blocks and their results) is a
+    // real shape the system must tolerate — load()/page() both apply it on
+    // read. Apply the same repair here, before it is ever written: writing
+    // the dangling tail as-is would bump message_count by a message that
+    // every future load() silently drops anyway, leaving the counter
+    // permanently wrong (and externally visible via GET /v1/sessions) for a
+    // discrepancy nothing ever logs or corrects.
+    const repaired = repairTail(newMessages);
+    if (repaired.length) {
       const file = path.join(this.sdir(id), "messages.jsonl");
       this.truncateTornTail(file); // never append behind an unreadable record
-      const lines = newMessages.map((m) => JSON.stringify(m)).join("\n") + "\n";
+      const lines = repaired.map((m) => JSON.stringify(m)).join("\n") + "\n";
       fs.appendFileSync(file, lines);
     }
-    meta.message_count += newMessages.length;
+    meta.message_count += repaired.length;
     meta.turns += 1;
     meta.updated_at = now.toISOString();
     meta.model = info.model;
