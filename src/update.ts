@@ -221,7 +221,19 @@ export function installUpdate(prepared: PreparedUpdate, opts: SelfUpdateOptions 
   try {
     fs.renameSync(download, exe);
   } catch (e) {
-    fs.renameSync(old, exe); // put the old one back before giving up
+    // put the old one back before giving up — but if THAT rename also fails
+    // (the same directory-level problem that broke the first one), its raw
+    // exception must not silently replace the original diagnostic, and the
+    // operator needs to be told exactly where their intact original binary
+    // is sitting so they can rename it back by hand (F704).
+    try {
+      fs.renameSync(old, exe);
+    } catch (rollbackError) {
+      throw new Error(
+        `could not move the new binary into place (${(e as Error).message}), and restoring the original binary ` +
+          `also failed (${(rollbackError as Error).message}) — your previous working binary is still intact at: ${old}`,
+      );
+    }
     throw new Error(`could not move the new binary into place: ${(e as Error).message}`);
   }
   const args = process.argv.slice(1);

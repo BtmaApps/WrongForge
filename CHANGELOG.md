@@ -39,6 +39,14 @@ package.json and the git tags that drive the release workflow.
   rejects a non-finite `expiresAt` the same way the OAuth token endpoint's
   response is already validated, falling back to the same one-hour default
   used for a genuinely missing field.
+- **If `wrongforge update` failed to move the new binary into place AND the
+  automatic rollback of the original binary also failed** (e.g. the whole
+  directory became briefly locked/read-only — the same condition that broke
+  the first move), the rollback's own raw error used to silently replace the
+  real diagnostic, and the operator was never told that their previous,
+  working binary was still sitting safely at `<exe>.old.<pid>` — just renamed
+  aside, not lost. The thrown error now names both failures and gives the
+  exact path to rename back by hand.
 
 ## [0.4.11] — 2026-10-20
 
