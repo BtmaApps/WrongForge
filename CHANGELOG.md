@@ -37,6 +37,16 @@ package.json and the git tags that drive the release workflow.
   includes the token, so every task added one permanent entry that was
   never evicted. The cache is now capped, evicting the oldest entry once
   the limit is reached.
+- **A tool exposed through the gateway or an MCP server could be given an
+  incorrect "required" field** when its input schema used `oneOf`/`anyOf`
+  and the first listed alternative required nothing — the merge that
+  builds the model-facing schema silently dropped that alternative's "this
+  branch demands nothing" signal when it came first, so a field only
+  required by a *later* alternative could incorrectly survive as required
+  on every call. The model was never told anything the schema's own
+  `oneOf`/`anyOf` didn't already describe, just the required-field summary
+  — now order-independent, as the merge's own documented contract always
+  intended.
 
 ## [0.4.12] — 2026-10-23
 

@@ -638,6 +638,27 @@ async function main(): Promise<void> {
       "oneOf keeps only the common required field",
     );
 
+    // F1002: the required-field intersection must be order-independent — a
+    // branch with NO required array at all demands nothing, so it must
+    // empty the intersection regardless of whether it is the first, middle
+    // or last branch in the array.
+    const noReqFirst = toApiInputSchema({
+      oneOf: [
+        { type: "object", properties: { a: { type: "string" } } }, // no required at all
+        { type: "object", properties: { a: { type: "string" }, b: { type: "string" } }, required: ["a", "b"] },
+        { type: "object", properties: { a: { type: "string" } }, required: ["a"] },
+      ],
+    });
+    assert(!("required" in noReqFirst), `F1002: a no-required branch FIRST still empties the intersection (got ${JSON.stringify((noReqFirst as any).required)})`);
+    const noReqMiddle = toApiInputSchema({
+      oneOf: [
+        { type: "object", properties: { a: { type: "string" }, b: { type: "string" } }, required: ["a", "b"] },
+        { type: "object", properties: { a: { type: "string" } } }, // no required at all
+        { type: "object", properties: { a: { type: "string" } }, required: ["a"] },
+      ],
+    });
+    assert(!("required" in noReqMiddle), "F1002: array order does not matter — a no-required branch in the middle also empties the intersection");
+
     // a bare non-object schema cannot describe a tool input: empty object fallback
     const bare = toApiInputSchema({ type: "string", description: "just text" });
     assert(bare.type === "object" && Object.keys(bare.properties as object).length === 0 && bare.description === "just text", "non-object schema falls back to an empty object, description kept");

@@ -174,20 +174,24 @@ function mergeObjectSchemas(parts: JsonSchema[], strict: boolean): { type: "obje
 
   for (const p of parts) {
     if (isSchema(p.properties)) Object.assign(properties, p.properties);
-    if (Array.isArray(p.required) && p.required.every((r) => typeof r === "string")) {
-      const req = p.required as string[];
-      if (!seenRequired) {
-        required = new Set(req);
-        seenRequired = true;
-      } else if (strict) {
-        for (const r of req) required.add(r);
-      } else {
-        required = new Set([...required].filter((r) => req.includes(r)));
-      }
-    } else if (!strict && seenRequired) {
-      // permissive: a branch that demands nothing empties the intersection —
-      // a field only stays required when EVERY alternative requires it
-      required = new Set();
+    // A branch with no `required` array demands nothing — treated as `[]`
+    // uniformly (not a special case) so it still counts as "a branch was
+    // seen" on the FIRST pass. Folding it in only when `seenRequired` was
+    // already true (the previous shape) silently dropped a no-required
+    // FIRST branch's "demands nothing" signal entirely, letting a later
+    // branch's own required fields survive into the union even though the
+    // first branch never required them (set intersection must not depend
+    // on array order).
+    const req = Array.isArray(p.required) && p.required.every((r) => typeof r === "string") ? (p.required as string[]) : [];
+    if (!seenRequired) {
+      required = new Set(req);
+      seenRequired = true;
+    } else if (strict) {
+      for (const r of req) required.add(r);
+    } else {
+      // permissive: a field only stays required when EVERY alternative
+      // requires it — intersecting with an empty `req` always empties this.
+      required = new Set([...required].filter((r) => req.includes(r)));
     }
     for (const key of ["$defs", "definitions"] as const) {
       if (isSchema(p[key])) Object.assign(defs, p[key] as JsonSchema);
