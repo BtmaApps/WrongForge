@@ -31,6 +31,12 @@ package.json and the git tags that drive the release workflow.
   real resource exhaustion on a constrained host. The poller now waits for
   a previous attempt to finish (success, already-current, or failure)
   before starting another.
+- **The tool gateway's discovery cache could grow without bound over a
+  server's lifetime** when an orchestrator uses a distinct per-task gateway
+  token (a reasonable, even recommended, security practice) — the cache key
+  includes the token, so every task added one permanent entry that was
+  never evicted. The cache is now capped, evicting the oldest entry once
+  the limit is reached.
 
 ## [0.4.12] — 2026-10-23
 

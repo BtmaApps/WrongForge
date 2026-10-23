@@ -107,6 +107,12 @@ const DEFAULT_CALL_TIMEOUT = 120_000;
 const MAX_CALL_TIMEOUT = 600_000;
 const MAX_TOOLS = 200;
 const MAX_OUTPUT_CHARS = 60_000;
+/** Discovery cache cap (F1001): the key includes the gateway's token/headers
+ *  (see `load()`), so a distinct per-task token — a realistic, even
+ *  recommended, orchestrator pattern — makes every task's entry unique.
+ *  Without a cap the cache grows by one entry per task for the whole life
+ *  of a long-running server. */
+const MAX_GATEWAY_CACHE_ENTRIES = 500;
 const LOOPBACK_HOSTS = ["127.0.0.1", "localhost", "::1", "[::1]"];
 const NAME_RE = /^[A-Za-z0-9_]{0,20}$/;
 
@@ -331,6 +337,13 @@ export class GatewayRegistry {
       } else {
         raw = await this.discover(g, signal);
         this.cache.set(key, { at: Date.now(), raw });
+        // Entries are never refreshed in place on a hit (see above — a hit
+        // returns early without touching the Map), so insertion order and
+        // recency agree: the first key is always the actual oldest entry.
+        if (this.cache.size > MAX_GATEWAY_CACHE_ENTRIES) {
+          const oldestKey = this.cache.keys().next().value;
+          if (oldestKey !== undefined) this.cache.delete(oldestKey);
+        }
       }
     }
     const { defs, warnings } = normalizeDefs(raw, g, this.o.reservedNames);

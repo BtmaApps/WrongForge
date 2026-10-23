@@ -486,6 +486,23 @@ async function main(): Promise<void> {
   const last = gwCalls.at(-1)!;
   assert(last.u === "/tools/alpha/call" && (last.body as { input: unknown }).input, "gateway call posts input");
 
+  // F1001: the discovery cache must never grow without bound — its key
+  // includes the gateway's token/headers, so a distinct per-task token (a
+  // realistic orchestrator pattern) would otherwise add one entry per task
+  // for the whole life of a long-running server.
+  const fakeDiscoveryFetch = (async () =>
+    new Response(JSON.stringify({ tools: [{ name: "x", description: "x", input_schema: { type: "object", properties: {} } }] }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    })) as unknown as typeof fetch;
+  const gatewayCacheReg = new GatewayRegistry({ reservedNames: new Set(), fetchImpl: fakeDiscoveryFetch, discoveryTtlMs: 0 });
+  const gatewayCacheCtx = { taskId: "t", sessionId: "s", workdir: "/w" };
+  for (let i = 0; i < 800; i++) {
+    await gatewayCacheReg.load({ url: "http://127.0.0.1:1/orchestrator", token: `task-token-${i}` }, gatewayCacheCtx);
+  }
+  const gatewayCacheSize = (gatewayCacheReg as unknown as { cache: Map<string, unknown> }).cache.size;
+  assert(gatewayCacheSize <= 500, `F1001: gateway discovery cache stays bounded (size=${gatewayCacheSize}) across 800 distinct per-task tokens`);
+
   // cache_control rejection -> retried once without markers, then disabled
   let cacheStep = 0;
   const cacheServer = http.createServer((req, res) => {
