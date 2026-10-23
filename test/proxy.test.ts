@@ -341,7 +341,70 @@ async function main(): Promise<void> {
     await h.close();
   }
 
-  console.log("PROXY TESTS PASSED ✓ (auth via x-api-key, JSON/SSE/error passthrough, CC costume in OAuth mode, pure passthrough in api-key mode, count_tokens/models, client abort, disable switch, proxy.call dashboard events + truncation + backlog)");
+  // ========================== client disconnects mid-stream (F105) ==========
+  // A client that hangs up WHILE the upstream is still streaming must still
+  // produce a proxy.call event (marked truncated) — the call genuinely
+  // reached upstream (tokens already billed), so it must not vanish from the
+  // dashboard just because nobody was left to receive the rest of it.
+  {
+    const h = await startHarness();
+    const origFetch = globalThis.fetch;
+    try {
+      let ctrl!: ReadableStreamDefaultController<Uint8Array>;
+      const stream = new ReadableStream<Uint8Array>({ start: (c) => (ctrl = c) });
+      const push = (s: string): void => ctrl.enqueue(new TextEncoder().encode(s));
+      const sse = (type: string, data: Record<string, unknown>): string => `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
+
+      // Only the upstream call (the fake's own base) is intercepted — matching
+      // on path alone would also swallow this test's own client-side fetch()
+      // to the real WrongForge server below, which shares the "/v1/messages" path.
+      globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        if (url.startsWith(h.fake.base) && url.includes("/v1/messages") && !url.includes("count_tokens")) {
+          return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
+        }
+        return origFetch(input as any, init);
+      }) as typeof fetch;
+
+      push(sse("message_start", { message: {} }));
+      push(sse("content_block_delta", { index: 0, delta: { type: "text_delta", text: "never finished" } }));
+
+      const r = await fetch(`${h.base}/v1/messages`, {
+        method: "POST",
+        headers: { "x-api-key": h.key, "Content-Type": "application/json" },
+        body: message("hi", { stream: true }),
+      });
+      const reader = r.body!.getReader();
+      await reader.read(); // the client has genuinely received data — the call is in flight
+      await reader.cancel(); // the client hangs up; the upstream stream is never closed/ended
+
+      await sleep(400); // let the server-side "close" handling settle before reading the backlog
+      const feedAc = new AbortController();
+      const feedRes = await fetch(`${h.base}/v1/events?key=${h.key}`, { headers: { Accept: "text/event-stream" }, signal: feedAc.signal });
+      setTimeout(() => feedAc.abort(), 300);
+      const feedReader = feedRes.body!.getReader();
+      const dec = new TextDecoder();
+      let feedText = "";
+      try {
+        for (;;) {
+          const { value, done } = await feedReader.read();
+          if (done) break;
+          feedText += dec.decode(value, { stream: true });
+        }
+      } catch {
+        /* aborted on purpose once the backlog window has passed */
+      }
+      const calls = parseSse(feedText).filter((b) => b.event === "proxy.call").map((b) => b.data);
+      const call = calls.find((c: any) => c.stream === true);
+      assert(call, "a client disconnecting mid-stream still produces a proxy.call event");
+      assert(call.response_truncated === true, "a call cut short by the client is marked truncated");
+    } finally {
+      globalThis.fetch = origFetch;
+      await h.close();
+    }
+  }
+
+  console.log("PROXY TESTS PASSED ✓ (auth via x-api-key, JSON/SSE/error passthrough, CC costume in OAuth mode, pure passthrough in api-key mode, count_tokens/models, client abort, disable switch, proxy.call dashboard events + truncation + backlog, client-disconnect-mid-stream tap delivery)");
 }
 
 main().then(

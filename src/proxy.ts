@@ -308,13 +308,30 @@ export function createProxyHandler(opts: ProxyOptions) {
           capture.push(chunk);
           capturedBytes += chunk.length;
         });
-        const finish = (): void => emitTap(upstream.status, Buffer.concat(capture).toString("utf8"), captureTruncated);
+        // Idempotent: "end"/"error"/the client-disconnect "close" below can
+        // each fire in different orders (a normal completion closes the
+        // connection too, right after "end"), but the tap must only ever be
+        // emitted once per call (F105).
+        let finished = false;
+        const finish = (forceTruncated?: boolean): void => {
+          if (finished) return;
+          finished = true;
+          emitTap(upstream.status, Buffer.concat(capture).toString("utf8"), forceTruncated ?? captureTruncated);
+        };
         stream.on("end", finish);
         stream.on("error", () => {
           res.destroy();
           finish();
         });
-        res.on("close", () => stream.destroy());
+        res.on("close", () => {
+          stream.destroy();
+          // The client hung up before the upstream stream naturally ended:
+          // destroy() fires neither "end" nor "error" on `stream`, so without
+          // this the call — headers already sent, tokens already billed
+          // upstream — would vanish from the dashboard forever (F105).
+          // Whatever was captured is necessarily incomplete, hence `true`.
+          finish(true);
+        });
         stream.pipe(res);
       }
       logger.info("proxy.request", {

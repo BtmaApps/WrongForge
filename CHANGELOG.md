@@ -18,6 +18,15 @@ package.json and the git tags that drive the release workflow.
   before giving up; a genuinely broken store (every attempt fails) still
   correctly stays silent rather than handing out an unresumable event, so the
   existing gap-free `seq` guarantee is unchanged.
+- **A client disconnecting mid-stream from `POST /v1/messages` made that call
+  permanently invisible on the dashboard's Proxy tab** — not even a partial
+  entry — even though it genuinely reached upstream (tokens already billed).
+  The tap's `finish()` only ran on the piped stream's `"end"`/`"error"`
+  events; a client hang-up instead calls `stream.destroy()`, which fires
+  neither. `finish()` now also runs from the response's own `"close"` handler
+  (idempotent, so a normal completion that fires `"end"` then `"close"` still
+  only emits one tap event), and such a call is marked `response_truncated`
+  since whatever was captured is necessarily incomplete.
 
 ## [0.4.11] — 2026-10-20
 
