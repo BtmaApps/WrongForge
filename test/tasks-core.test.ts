@@ -6,7 +6,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { Fake, assert, parseSse, sleep, startHarness } from "./helpers/harness.js";
+import { Fake, assert, parseSse, sleep, startHarness, startReceiver } from "./helpers/harness.js";
 import { TaskStore } from "../src/tasks/store.js";
 import { gzipFile } from "../src/log.js";
 
@@ -552,9 +552,50 @@ async function main(): Promise<void> {
     }
   }
 
+  // ==================================================== terminal-event delivery (F103)
+  // The TERMINAL event (task.completed/failed/cancelled/timed_out) is a task's
+  // last word: unlike an intermediate event, no later event can ever heal a
+  // dropped one. A ONE-OFF transient append failure on it (the realistic
+  // trigger: a brief antivirus/indexer file lock) must not permanently
+  // silence the task for its subscribers and webhook.
+  {
+    const h7 = await startHarness({ fake });
+    try {
+      const d7 = h7.mkdir("termevt");
+      const store = h7.app.taskStore as unknown as { appendEvent: (ev: unknown) => void };
+      const append = store.appendEvent.bind(store);
+      const seenTypes: string[] = [];
+      h7.app.manager.subscribe((ev: { type: string }) => seenTypes.push(ev.type));
+      const rcv = await startReceiver((_r, res) => void res.writeHead(200).end("ok"));
+      let thrown = 0;
+      store.appendEvent = (ev: unknown) => {
+        if ((ev as { type: string }).type === "task.completed" && thrown < 1) {
+          thrown++;
+          throw new Error("injected: EBUSY (transient, the very next attempt succeeds)");
+        }
+        return append(ev);
+      };
+      const t7 = (await h7.api("POST", "/v1/tasks", {
+        workdir: d7,
+        prompt: `${tool("ls", { path: "." })} [[say later]]`,
+        callback: { url: rcv.url, events: ["*"] },
+      })).body.task;
+      const done7 = await h7.waitTask(t7.id);
+      await sleep(250);
+      await h7.app.webhook.idle();
+      assert(thrown === 1, "the injected transient failure was actually reached exactly once");
+      assert(done7.status === "completed", `the task still completes (${done7.status})`);
+      assert(seenTypes.includes("task.completed"), "a one-off transient failure on the terminal event must not silence the live subscriber feed");
+      assert(rcv.received.some((r) => r.json?.type === "task.completed"), "the task's webhook must still receive task.completed after one transient hiccup");
+      await rcv.close();
+    } finally {
+      await h7.close();
+    }
+  }
+
   await h3.close();
   await fake.close();
-  console.log("TASKS CORE TESTS PASSED ✓ (auth, validation, lifecycle, events, idempotency, wait/stream/replay/long-poll, sessions, cache prefix stability, restart continuity, recovery, maintenance, dashboard, event-log integrity)");
+  console.log("TASKS CORE TESTS PASSED ✓ (auth, validation, lifecycle, events, idempotency, wait/stream/replay/long-poll, sessions, cache prefix stability, restart continuity, recovery, maintenance, dashboard, event-log integrity, terminal-event delivery)");
 }
 
 main().then(

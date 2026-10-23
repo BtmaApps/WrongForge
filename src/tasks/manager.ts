@@ -130,6 +130,16 @@ interface Live {
 const MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/;
 const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]{0,99}$/;
 
+/**
+ * A task emits nothing after one of these: unlike an intermediate event
+ * (where the next heartbeat/step/tool event "heals" a dropped one), a
+ * one-off durable-write hiccup here has no later chance to recover — the
+ * task is already terminal, so every subscriber and its webhook would stay
+ * silent about it forever. Worth a couple of immediate retries before that
+ * happens (see F103).
+ */
+const TERMINAL_EVENT_TYPES: ReadonlySet<TaskEventType> = new Set(["task.completed", "task.failed", "task.cancelled", "task.timed_out"]);
+
 /** Workdir identity for locking (Windows paths are case-insensitive). */
 const dirKey = (p: string): string => (process.platform === "win32" ? p.toLowerCase() : p);
 
@@ -1058,10 +1068,26 @@ export class TaskManager {
     const ts = new Date().toISOString();
     const ev: TaskEvent = { seq, ts, task_id: id, session_id: rec.session_id, type, data };
 
-    try {
-      o.store.appendEvent(ev);
-    } catch (e) {
-      o.logger.error("task.event_write_failed", { task_id: id, seq, error: e });
+    // A terminal event gets a couple of immediate retries: it is the task's
+    // last word, so a one-off hiccup (e.g. a brief antivirus/indexer file
+    // lock on Windows) must not cost it forever — there is no later event
+    // to carry the notification instead (F103). An intermediate event is
+    // not retried: the next one already heals the stream, exactly as today.
+    const attempts = TERMINAL_EVENT_TYPES.has(type) ? 3 : 1;
+    let wrote = false;
+    let lastErr: unknown;
+    for (let i = 0; i < attempts && !wrote; i++) {
+      try {
+        o.store.appendEvent(ev);
+        wrote = true;
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+    if (!wrote) {
+      o.logger.error(attempts > 1 ? "task.terminal_event_lost" : "task.event_write_failed", {
+        task_id: id, seq, type, attempts, error: lastErr,
+      });
       // The event never reached the durable log, so nothing can replay it.
       // Give the seq back (events.jsonl stays gap-free, as documented) and do
       // not hand a seq to a subscriber or the webhook that no reader would

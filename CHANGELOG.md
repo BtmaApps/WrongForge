@@ -6,6 +6,19 @@ package.json and the git tags that drive the release workflow.
 
 ## [Unreleased]
 
+### Fixed
+- **A one-off transient write hiccup on a task's TERMINAL event (`task.completed` /
+  `task.failed` / `task.cancelled` / `task.timed_out`) could silence that task
+  forever for its live subscribers and its webhook**, even though the task's
+  own record correctly showed it had finished. Unlike an intermediate event —
+  where the next heartbeat/step/tool event heals a dropped one — the terminal
+  event is a task's last word, so a single failed `events.jsonl` append (e.g.
+  a brief antivirus/indexer file lock on Windows) had no later chance to
+  recover. The terminal event's durable write is now retried a few times
+  before giving up; a genuinely broken store (every attempt fails) still
+  correctly stays silent rather than handing out an unresumable event, so the
+  existing gap-free `seq` guarantee is unchanged.
+
 ## [0.4.11] — 2026-10-20
 
 ### Fixed
