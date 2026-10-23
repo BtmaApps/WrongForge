@@ -20,6 +20,17 @@ package.json and the git tags that drive the release workflow.
   was externally visible. `appendTurn()` now applies the same repair
   before writing, so the counter and the stored history can never
   disagree.
+- **The automatic self-update idle poller (`WRONGFORGE_AUTO_UPDATE=1`) could
+  start downloading the same release multiple times at once** on a
+  connection slow enough that one download outlasted the poll interval
+  (every 2 minutes by default) — nothing stopped the next tick from trying
+  again while a previous attempt was still in flight, the same defect shape
+  already found and fixed once in the periodic maintenance scheduler. Each
+  overlapping attempt independently re-checks GitHub and re-downloads the
+  release asset into memory, wasting bandwidth and API calls and risking
+  real resource exhaustion on a constrained host. The poller now waits for
+  a previous attempt to finish (success, already-current, or failure)
+  before starting another.
 
 ## [0.4.12] — 2026-10-23
 

@@ -975,27 +975,38 @@ export async function startEnvServer(): Promise<EnvServer> {
   };
 
   if (autoUpdateEnabled && isCompiledBinary() && Number.isFinite(autoUpdatePollMs) && autoUpdatePollMs > 0) {
+    // F963: prepareUpdate() is a real network download that can easily
+    // outlast one poll interval on a slow connection — without this guard
+    // (the same shape as maintenance.ts's own tick, F703) every tick calls
+    // it again regardless, so a slow connection accumulates more and more
+    // concurrent downloads of the same release instead of one at a time.
+    let preparing = false;
     const maybeAutoUpdate = (): void => {
-      if (stopping) return;
+      if (stopping || preparing) return;
       const u = lastUpdateCheck();
       if (!u) return; // nothing newer known yet — the daily check will find it
       const c = app.manager.counts();
       if (c.queued > 0 || c.running > 0) return; // busy — try again next poll
+      preparing = true;
       app.logger.info("auto_update.preparing", { current: u.current, latest: u.latest });
-      void prepareUpdate().then(
-        (prepared) => {
-          // Re-checked busy-ness is pointless here (the download itself can
-          // take a while and a task could have started), but the install
-          // phase below is what actually stops the server, so check once
-          // more right before committing to it.
-          if (!prepared || stopping) return;
-          const c2 = app.manager.counts();
-          if (c2.queued > 0 || c2.running > 0) return;
-          app.logger.info("auto_update.installing", { current: prepared.rel.current, latest: prepared.rel.latest });
-          void stopServing("auto-update").then(() => installUpdate(prepared, { respawn: !process.env.WRONGFORGE_SUPERVISED_CHILD }));
-        },
-        (e) => app.logger.warn("auto_update.prepare_failed", { error: (e as Error).message }), // network hiccup — nothing was torn down, try again next poll
-      );
+      void prepareUpdate()
+        .then(
+          (prepared) => {
+            // Re-checked busy-ness is pointless here (the download itself can
+            // take a while and a task could have started), but the install
+            // phase below is what actually stops the server, so check once
+            // more right before committing to it.
+            if (!prepared || stopping) return;
+            const c2 = app.manager.counts();
+            if (c2.queued > 0 || c2.running > 0) return;
+            app.logger.info("auto_update.installing", { current: prepared.rel.current, latest: prepared.rel.latest });
+            void stopServing("auto-update").then(() => installUpdate(prepared, { respawn: !process.env.WRONGFORGE_SUPERVISED_CHILD }));
+          },
+          (e) => app.logger.warn("auto_update.prepare_failed", { error: (e as Error).message }), // network hiccup — nothing was torn down, try again next poll
+        )
+        .finally(() => {
+          preparing = false;
+        });
     };
     autoUpdateTimer = setInterval(maybeAutoUpdate, autoUpdatePollMs);
     autoUpdateTimer.unref();
