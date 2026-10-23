@@ -635,11 +635,19 @@ export class ClaudeOAuth {
     if (!o?.accessToken) {
       throw new Error(`no claudeAiOauth.accessToken in ${source} — sign in with Claude Code, then retry`);
     }
+    // Same trust-boundary rule as applyTokenResponse's F502 fix: a malformed
+    // value (not a finite number — e.g. a corrupted/edited credentials file
+    // producing Infinity or NaN) must fall back to the same default used for
+    // a MISSING field, not be treated as "never expires" or, worse, crash
+    // this function's own logging line below with `new Date(Infinity)` (F504).
+    const expiresAt =
+      typeof o.expiresAt === "number" && Number.isFinite(o.expiresAt)
+        ? o.expiresAt
+        : Date.now() + 3600_000;
     const t: StoredToken = {
       accessToken: o.accessToken,
       refreshToken: o.refreshToken ?? "",
-      expiresAt:
-        typeof o.expiresAt === "number" ? o.expiresAt : Date.now() + 3600_000,
+      expiresAt,
       scope: Array.isArray(o.scopes)
         ? o.scopes.join(" ")
         : "user:inference user:profile",

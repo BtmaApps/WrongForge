@@ -228,6 +228,22 @@ function main(): Promise<void> {
         if (viaImport !== "imported-at") throw new Error("imported token not usable");
         check(oauth2.signedIn, "import marks the session as signed in");
 
+        // 4b) a malformed/corrupted credentials file must not crash the import
+        // nor be accepted as "this token lives forever" (F504): expiresAt as a
+        // numeric literal too large for a double rounds to Infinity, which
+        // `typeof x === "number"` alone does not catch.
+        {
+          const credFileBad = path.join(mkTmp("claude-import-badexp-"), ".credentials.json");
+          fs.writeFileSync(
+            credFileBad,
+            '{"claudeAiOauth":{"accessToken":"bad-exp-at","refreshToken":"bad-exp-rt","expiresAt":1e400,"scopes":["user:inference"]}}',
+          );
+          const oauthBad = new ClaudeOAuth(path.join(path.dirname(credFileBad), "tokens.json"));
+          const importedBad = oauthBad.importFromClaudeCode(credFileBad); // must not throw
+          check(Number.isFinite(importedBad.expiresAt), "a non-finite expiresAt falls back to a finite default instead of crashing or living forever");
+          check(importedBad.accessToken === "bad-exp-at", "the rest of a malformed-expiresAt import still succeeds");
+        }
+
         // 5) self-healing: a rejected refresh token adopts Claude Code's session
         {
           let ccRefreshes = 0;

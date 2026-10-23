@@ -27,6 +27,18 @@ package.json and the git tags that drive the release workflow.
   (idempotent, so a normal completion that fires `"end"` then `"close"` still
   only emits one tap event), and such a call is marked `response_truncated`
   since whatever was captured is necessarily incomplete.
+- **Importing a corrupted or malformed Claude Code credentials file could crash
+  the import instead of reporting a clear error**, and in the worst case could
+  make WrongForge treat the adopted session as never expiring. A `expiresAt`
+  value that round-trips through JSON as `Infinity` (e.g. a numeric literal too
+  large for a double, from disk corruption or a future Claude Code bug) passed
+  the existing `typeof === "number"` check, then crashed the import's own
+  success-logging line (`new Date(Infinity).toISOString()` throws
+  `RangeError: Invalid time value`) — or, had that line not existed, would have
+  made the token's expiry check always false. `importFromClaudeCode()` now
+  rejects a non-finite `expiresAt` the same way the OAuth token endpoint's
+  response is already validated, falling back to the same one-hour default
+  used for a genuinely missing field.
 
 ## [0.4.11] — 2026-10-20
 
