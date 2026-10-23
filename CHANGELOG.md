@@ -6,6 +6,8 @@ package.json and the git tags that drive the release workflow.
 
 ## [Unreleased]
 
+## [0.4.13] — 2026-10-23
+
 ### Fixed
 - **A session turn that ended in an unanswered tool call could permanently
   desync a session's reported `message_count` from what it would ever
