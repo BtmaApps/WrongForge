@@ -253,7 +253,13 @@ export async function runAgentTurn(
       usage.total_tokens += u.total_tokens;
       usage.cache_read_tokens += u.cache_read_tokens;
       usage.cache_write_tokens += u.cache_write_tokens;
-      contextTokens = u.input_tokens + u.output_tokens;
+      // The true size of the NEXT request's prompt: uncached input + both
+      // cache components + output. With prompt caching the API's
+      // `input_tokens` is only the uncached tail — ignoring the cache
+      // components made context_tokens report ~1-2k for a ~1M-token prompt,
+      // so neither compact_at nor the in-task clear_at guard could ever fire
+      // (issue #5).
+      contextTokens = u.input_tokens + u.cache_read_tokens + u.cache_write_tokens + u.output_tokens;
       onEvent?.({
         type: "step_finish", step: steps, finish_reason: String(finishReason), usage: u, context_tokens: contextTokens,
       });

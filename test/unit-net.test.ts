@@ -136,6 +136,44 @@ async function main(): Promise<void> {
   assert(msgReq!.body.system?.[0]?.text?.startsWith("x-anthropic-billing-header:"), "billing header first system block");
   assert(msgReq!.url.includes("beta=true"), "beta=true query");
 
+  // F1401: context_tokens must include cached input — with prompt caching the
+  // API's `input_tokens` is only the uncached tail, so ignoring the cache
+  // components made a ~900k-token session report ~1k and auto-compaction
+  // could never fire.
+  {
+    const cacheUsage = {
+      input_tokens: 84,
+      output_tokens: 960,
+      cache_read_input_tokens: 900_000,
+      cache_creation_input_tokens: 0,
+    };
+    const cacheEvents = [
+      { type: "message_start", message: { usage: cacheUsage } },
+      { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+      { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "done" } },
+      { type: "content_block_stop", index: 0 },
+      { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 960 } },
+      { type: "message_stop" },
+    ];
+    const cacheClient = {
+      messages: {
+        stream: () => ({
+          async *[Symbol.asyncIterator]() {
+            for (const ev of cacheEvents) yield ev;
+          },
+          async finalMessage() {
+            return { stop_reason: "end_turn", content: [{ type: "text", text: "done" }], usage: cacheUsage };
+          },
+        }),
+      },
+    } as unknown as Anthropic;
+    const cacheTurn = await runAgentTurn(cacheClient, "m", [{ role: "user", content: "hi" }] as AgentMessage[], 1);
+    assert(
+      cacheTurn.context_tokens >= 900_000,
+      `F1401: context_tokens includes cached input (got ${cacheTurn.context_tokens}, cache_read ${cacheUsage.cache_read_input_tokens})`,
+    );
+  }
+
   // 401 → refresh → retry
   let oauthState = 0;
   const authServer = http.createServer((req, res) => {

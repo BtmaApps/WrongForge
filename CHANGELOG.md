@@ -6,6 +6,16 @@ package.json and the git tags that drive the release workflow.
 
 ## [Unreleased]
 
+### Fixed
+- **Auto-compaction never fired for cached sessions, so they grew until the
+  API's hard `prompt is too long` limit.** `context_tokens` was computed as
+  uncached input + output only; with prompt caching the API's `input_tokens`
+  is just the uncached tail, so a session whose real prompt had grown to
+  ~1M tokens reported ~1-2k and neither `compact_at` (150k) nor the in-task
+  `clear_at` guard could ever trigger. Cached input (read + write) is now
+  included, so the reported context size is the true next-request prompt
+  size. Found and reported by korlog (#5).
+
 ## [0.4.13] — 2026-10-23
 
 ### Fixed
