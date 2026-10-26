@@ -6,6 +6,8 @@ package.json and the git tags that drive the release workflow.
 
 ## [Unreleased]
 
+## [0.4.14] — 2026-10-26
+
 ### Fixed
 - **Auto-compaction never fired for cached sessions, so they grew until the
   API's hard `prompt is too long` limit.** `context_tokens` was computed as
