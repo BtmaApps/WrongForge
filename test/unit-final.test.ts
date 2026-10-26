@@ -27,6 +27,7 @@ import { mapCallResult } from "../src/mcp/registry.js";
 import { ClaudeOAuth } from "../src/oauth.js";
 import { fetchPlanUsage, untilLabel, usageLine } from "../src/usage.js";
 import { toApiMessages } from "../src/messages.js";
+import type Anthropic from "@anthropic-ai/sdk";
 import { SessionStore } from "../src/sessions.js";
 import { TaskStore } from "../src/tasks/store.js";
 import { createApp } from "../src/app.js";
@@ -301,9 +302,96 @@ async function main(): Promise<void> {
     await reg.closeAll();
   }
 
+  // F1301: compactSession TOCTOU — a task completing inside the summarizer's
+  // network window used to be silently dropped from the session's live
+  // history by the summary built from the pre-task snapshot. The snapshot
+  // fingerprint check must refuse the compaction instead — and must NOT
+  // refuse a compaction with no concurrent change.
+  {
+    const usage = { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
+    const instantStream = (text: string): any => {
+      const events = [
+        { type: "message_start", message: { usage } },
+        { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+        { type: "content_block_delta", index: 0, delta: { type: "text_delta", text } },
+        { type: "content_block_stop", index: 0 },
+        { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 5 } },
+        { type: "message_stop" },
+      ];
+      return {
+        async *[Symbol.asyncIterator]() {
+          for (const ev of events) yield ev;
+        },
+        async finalMessage() {
+          return { stop_reason: "end_turn", content: [{ type: "text", text }], usage };
+        },
+      };
+    };
+    const { TaskManager } = await import("../src/tasks/manager.js");
+    const makeManager = (gate?: Promise<void>) => {
+      const dir = fs.mkdtempSync(path.join(tmp, "f1301-"));
+      const sessions = new SessionStore(path.join(dir, "sessions"));
+      const store = new TaskStore(path.join(dir, "tasks"));
+      const client = {
+        messages: {
+          stream: () => instantStream("concurrent-task-reply"),
+          create: async () => {
+            if (gate) await gate;
+            return { stop_reason: "end_turn", content: [{ type: "text", text: "SUMMARY" }], usage };
+          },
+        },
+      } as unknown as Anthropic;
+      const logger = { info: () => {}, warn: () => {}, error: () => {}, log: () => {}, debug: () => {} } as any;
+      const manager = new TaskManager({
+        store, sessions, client, logger, defaultModel: "test-model", heartbeatMs: 60_000, textFlushMs: 20, progressSaveMs: 20,
+      } as any);
+      return { manager, sessions, workdir: fs.mkdtempSync(path.join(dir, "wd-")), dir };
+    };
+    const seed = (sessions: SessionStore, sid: string): void => {
+      sessions.create(sid);
+      for (let t = 1; t <= 4; t++) {
+        sessions.appendTurn(
+          sid,
+          [
+            { role: "user", content: `old question ${t}` },
+            { role: "assistant", content: `old answer ${t}` },
+          ] as any,
+          { task_id: `seed-${t}`, model: "test-model", prompt: `q${t}` },
+        );
+      }
+    };
+    // race: the task completes while the summarizer is in flight
+    {
+      let release!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      const { manager, sessions, workdir, dir } = makeManager(gate);
+      seed(sessions, "ses_f1301");
+      const compaction = manager.compactSession("ses_f1301").catch((e: unknown) => e);
+      const { task } = manager.submit({ session_id: "ses_f1301", prompt: "tiny concurrent task", workdir, max_steps: 1 });
+      const done = await manager.waitFor(task.id);
+      release();
+      const err = (await compaction) as Error;
+      const after = sessions.load("ses_f1301")!;
+      assert(done?.status === "completed", "F1301: the concurrent task completed");
+      assert(err instanceof Error && /changed/i.test(err.message), "F1301: the compaction refused instead of installing a stale summary");
+      assert(JSON.stringify(after.messages).includes("concurrent-task-reply"), "F1301: the task's turn survives in the live history");
+      assert(after.meta.message_count === 10, "F1301: message_count reflects the turn (no silent drop)");
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+    // no concurrency: compaction succeeds (no false positive)
+    {
+      const { manager, sessions, dir } = makeManager();
+      seed(sessions, "ses_f1301_ok");
+      const res = (await manager.compactSession("ses_f1301_ok")) as any;
+      assert(res?.compacted === true, "F1301: a compaction with no concurrent change still succeeds");
+      assert(JSON.stringify(sessions.load("ses_f1301_ok")!.messages).includes("SUMMARY"), "F1301: the summary was installed on the clean path");
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
   for (const s of [webServer, authServer]) s.close();
   runInContext; // keep import used
-  console.log("UNIT FINAL TESTS PASSED ✓ (tool errors, web types, mcp mapping, login, usage, corruption, logging)");
+  console.log("UNIT FINAL TESTS PASSED ✓ (tool errors, web types, mcp mapping, login, usage, corruption, logging, compact race)");
 }
 
 main().catch((e) => {

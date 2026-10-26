@@ -25,6 +25,19 @@ package.json and the git tags that drive the release workflow.
   "[Session recovery] …" placeholder (the full original conversation is
   archived next to the session files) instead of installing a truncated
   summary or throwing. Found and reported by korlog (#6).
+- **Compacting a session manually could silently drop a task's completed
+  turn from the session's live history.** `POST /v1/sessions/:id/compact`
+  checks that the session is idle, then spends seconds summarizing — and a
+  task submitted for that session during those seconds could start and even
+  finish inside the window, so the summary (built from the earlier
+  snapshot) was installed over a history that now contained the task's
+  turn: the turn vanished from everything the session would resume from,
+  surviving only in the archive file, with no error anywhere. The
+  compaction now compares the stored history against the snapshot the
+  summary was built from and refuses with `409 session_busy` ("the session
+  changed while the summary was being written") instead of installing a
+  stale summary; a still-running task is unaffected (its turn appends to
+  the compacted history when it finishes).
 
 ## [0.4.13] — 2026-10-23
 

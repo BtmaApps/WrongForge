@@ -978,6 +978,24 @@ export class TaskManager {
     if (!res) {
       return { compacted: false, messages_before: loaded.messages.length, messages_after: loaded.messages.length, turns_summarized: 0, meta: loaded.meta };
     }
+    // F1301: the sessionInUse check above ran BEFORE the summarizer's network
+    // round-trip. A task submitted for this session during those seconds can
+    // start AND complete its turn before we get here — installing the summary
+    // built from the pre-task snapshot would then silently drop that turn
+    // from the session's live history (it would survive only in the archive
+    // file). A completed-inside-the-window task is invisible to a
+    // sessionInUse re-check (it already left activeSessions), so instead
+    // compare against the snapshot the summary was built from: turns are only
+    // ever APPENDED (appendTurn), so any change in the stored history means
+    // the summary no longer describes what a reader would resume from.
+    const current = o.sessions.load(sessionId);
+    if (!current || current.meta.message_count !== loaded.meta.message_count || current.messages.length !== loaded.messages.length) {
+      throw new SubmitError(
+        409,
+        "session_busy",
+        "the session changed while the summary was being written; it was left unchanged — retry the compaction",
+      );
+    }
     const { archive, meta } = await o.sessions.replaceMessages(sessionId, res.messages);
     o.logger.info("session.compacted", {
       session_id: sessionId, manual: true, messages_before: res.messages_before, messages_after: res.messages_after, archive,
