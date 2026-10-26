@@ -38,6 +38,16 @@ package.json and the git tags that drive the release workflow.
   changed while the summary was being written") instead of installing a
   stale summary; a still-running task is unaffected (its turn appends to
   the compacted history when it finishes).
+- **The installers could install an unverified binary when the checksums
+  download itself failed**, silently skipping the promised SHA256
+  verification (`curl … | bash` on Unix; `irm … | iex` on Windows) — the
+  opposite of the compiled binary's own self-update rule, which refuses
+  unverified bytes outright. A missing `SHA256SUMS.txt` download, a missing
+  asset line, or (on Unix) a system without a sha256 tool now all abort the
+  install with a clear "refusing to install an unverified binary" message
+  instead of proceeding unchecked. The installer test suite's mock also now
+  serves a real checksums file, so the verification path is genuinely
+  exercised, with new fail-closed regression cases for both failure modes.
 
 ## [0.4.13] — 2026-10-23
 

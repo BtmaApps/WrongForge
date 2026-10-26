@@ -37,17 +37,21 @@ $tmp = Join-Path $env:TEMP "wrongforge-install-$([guid]::NewGuid().ToString('N')
 New-Item -ItemType Directory -Path $tmp | Out-Null
 try {
   Invoke-WebRequest -Uri "$base/$asset" -OutFile "$tmp\$asset"
+  # Fail closed (mirrors the binary's own self-update rule: never install
+  # unverified bytes). A sums download that fails is an install-stopping
+  # error, not a reason to skip verification.
   $sumsFile = "$tmp\SHA256SUMS.txt"
-  try { Invoke-WebRequest -Uri "$base/SHA256SUMS.txt" -OutFile $sumsFile } catch { $sumsFile = $null }
-
-  if ($sumsFile -and (Test-Path $sumsFile)) {
-    $want = (Get-Content $sumsFile | Where-Object { $_ -match "\s$asset`$" } | ForEach-Object { ($_ -split '\s+')[0] }) | Select-Object -First 1
-    if ($want) {
-      $got = (Get-FileHash -Algorithm SHA256 "$tmp\$asset").Hash.ToLower()
-      if ($got -ne $want.ToLower()) { throw "sha256 mismatch for $asset (wanted $want, got $got)" }
-      Write-Host "+ sha256 verified"
-    }
+  try {
+    Invoke-WebRequest -Uri "$base/SHA256SUMS.txt" -OutFile $sumsFile
+  } catch {
+    throw "could not download SHA256SUMS.txt - refusing to install an unverified binary"
   }
+
+  $want = (Get-Content $sumsFile | Where-Object { $_ -match "\s$asset`$" } | ForEach-Object { ($_ -split '\s+')[0] }) | Select-Object -First 1
+  if (-not $want) { throw "$asset has no entry in SHA256SUMS.txt - refusing to install an unverified binary" }
+  $got = (Get-FileHash -Algorithm SHA256 "$tmp\$asset").Hash.ToLower()
+  if ($got -ne $want.ToLower()) { throw "sha256 mismatch for $asset (wanted $want, got $got)" }
+  Write-Host "+ sha256 verified"
 
   New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
   Move-Item "$tmp\$asset" "$InstallDir\wrongforge.exe" -Force

@@ -44,18 +44,22 @@ trap 'rm -rf "$tmp"' EXIT
 
 echo "→ ${asset} from ${REPO} ${version}"
 curl -fsSL --max-time 300 -o "$tmp/$asset" "$base/$asset"
-curl -fsSL --max-time 30 -o "$tmp/SHA256SUMS.txt" "$base/SHA256SUMS.txt" || true
+# Fail closed (mirrors the binary's own self-update rule: never install
+# unverified bytes). A sums download that fails is an install-stopping
+# error, not a reason to skip verification.
+curl -fsSL --max-time 30 -o "$tmp/SHA256SUMS.txt" "$base/SHA256SUMS.txt" \
+  || { echo "!! could not download SHA256SUMS.txt — refusing to install an unverified binary" >&2; exit 1; }
 
-if [ -s "$tmp/SHA256SUMS.txt" ]; then
-  want="$(grep " $asset\$" "$tmp/SHA256SUMS.txt" | awk '{print $1}')"
-  if [ -n "$want" ]; then
-    if command -v sha256sum >/dev/null 2>&1; then got="$(sha256sum "$tmp/$asset" | awk '{print $1}')"
-    elif command -v shasum >/dev/null 2>&1; then got="$(shasum -a 256 "$tmp/$asset" | awk '{print $1}')"
-    else echo "!! no sha256 tool found — skipping verification" >&2; got="$want"; fi
-    [ "$got" = "$want" ] || { echo "sha256 mismatch for $asset (wanted $want, got $got)" >&2; exit 1; }
-    echo "✓ sha256 verified"
-  fi
+want="$(grep " $asset\$" "$tmp/SHA256SUMS.txt" | awk '{print $1}' || true)"
+if [ -z "$want" ]; then
+  echo "!! $asset has no entry in SHA256SUMS.txt — refusing to install an unverified binary" >&2
+  exit 1
 fi
+if command -v sha256sum >/dev/null 2>&1; then got="$(sha256sum "$tmp/$asset" | awk '{print $1}')"
+elif command -v shasum >/dev/null 2>&1; then got="$(shasum -a 256 "$tmp/$asset" | awk '{print $1}')"
+else echo "!! no sha256 tool found — cannot verify the download, refusing to install" >&2; exit 1; fi
+[ "$got" = "$want" ] || { echo "sha256 mismatch for $asset (wanted $want, got $got)" >&2; exit 1; }
+echo "✓ sha256 verified"
 
 mkdir -p "$DEST" 2>/dev/null || true
 # Always expose the same command, regardless of the release asset's name.

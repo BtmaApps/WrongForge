@@ -16,8 +16,17 @@ try {
   Set-Content $source 'class Fixture { static void Main() { System.Console.WriteLine("fixture-version"); } }'
   & "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /nologo "/out:$fixture" $source
   if ($LASTEXITCODE -ne 0) { throw 'fixture compilation failed' }
+  # F1201: the installer verifies against a real sums line — default the mock
+  # to the fixture's true hash; SumsMode switches a regression case to a
+  # failed download or a corrupted hash.
+  $SumsMode = 'ok'
+  $fixtureHash = (Get-FileHash -Algorithm SHA256 $fixture).Hash.ToLower()
   function Invoke-WebRequest { param($Uri, $OutFile)
-    if ($Uri.EndsWith('SHA256SUMS.txt')) { Set-Content $OutFile '' }
+    if ($Uri.EndsWith('SHA256SUMS.txt')) {
+      if ($SumsMode -eq 'fail') { throw 'simulated checksum-download failure' }
+      $hash = if ($SumsMode -eq 'mismatch') { '0' * 64 } else { $fixtureHash }
+      Set-Content $OutFile "$hash  wrongforge-windows-x64.exe"
+    }
     elseif ($Uri.EndsWith('oauth.config.example.json')) { Set-Content $OutFile '{"clientId":"test-client-id"}' }
     else { Copy-Item $fixture $OutFile }
   }
@@ -50,7 +59,23 @@ try {
     & $installerPath -Version v0.0.0 -InstallDir 'relative tools'
     if (($state.Path -split ';')[0] -ne (Join-Path $tmp 'relative tools')) { throw 'FAIL: relative install destination persisted in PATH' }
   } finally { Pop-Location }
-  Write-Host 'PASS: Windows exact PATH entries, current shell, child cmd, repeat install'
+
+  # F1201 regression: a failing checksum download or a mismatching hash must
+  # abort the install — never install unverified bytes (fail closed, matching
+  # the binary's own self-update rule). The abort is asserted via the artifact
+  # (no binary may exist); a plain catch swallows the installer's own throw,
+  # since `*> $null`-style redirection would swallow the terminating error and
+  # keep the caller's catch from firing.
+  $failsDir = Join-Path $tmp 'fails'
+  $SumsMode = 'fail'
+  try { & $installerPath -Version v0.0.0 -InstallDir $failsDir } catch { }
+  if (Test-Path (Join-Path $failsDir 'wrongforge.exe')) { throw 'FAIL: unverified binary installed after sums-download failure' }
+  $SumsMode = 'mismatch'
+  try { & $installerPath -Version v0.0.0 -InstallDir $failsDir } catch { }
+  if (Test-Path (Join-Path $failsDir 'wrongforge.exe')) { throw 'FAIL: mismatched binary installed' }
+  $SumsMode = 'ok'
+
+  Write-Host 'PASS: Windows exact PATH entries, current shell, child cmd, repeat install, checksum fail-closed'
 } finally {
   $env:Path = $oldPath
   $env:WRONGFORGE_HOME = $oldHome
