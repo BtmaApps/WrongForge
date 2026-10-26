@@ -20,7 +20,10 @@ try {
   # to the fixture's true hash; SumsMode switches a regression case to a
   # failed download or a corrupted hash.
   $SumsMode = 'ok'
-  $fixtureHash = (Get-FileHash -Algorithm SHA256 $fixture).Hash.ToLower()
+  # .NET directly, not Get-FileHash: some stripped PowerShell sessions (a CI
+  # runner's was the first witness) cannot resolve the Utility cmdlet, and the
+  # harness must not depend on module autoloading.
+  $fixtureHash = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash([IO.File]::ReadAllBytes($fixture))).Replace('-', '').ToLower()
   function Invoke-WebRequest { param($Uri, $OutFile)
     if ($Uri.EndsWith('SHA256SUMS.txt')) {
       if ($SumsMode -eq 'fail') { throw 'simulated checksum-download failure' }

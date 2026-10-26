@@ -49,7 +49,15 @@ try {
 
   $want = (Get-Content $sumsFile | Where-Object { $_ -match "\s$asset`$" } | ForEach-Object { ($_ -split '\s+')[0] }) | Select-Object -First 1
   if (-not $want) { throw "$asset has no entry in SHA256SUMS.txt - refusing to install an unverified binary" }
-  $got = (Get-FileHash -Algorithm SHA256 "$tmp\$asset").Hash.ToLower()
+  # SHA256 via .NET directly, not Get-FileHash: the Utility cmdlet is missing
+  # from some stripped PowerShell sessions (a CI runner's was the first
+  # witness), and verification must never depend on module autoloading.
+  $sha = [Security.Cryptography.SHA256]::Create()
+  try {
+    $got = [BitConverter]::ToString($sha.ComputeHash([IO.File]::ReadAllBytes("$tmp\$asset"))).Replace('-', '').ToLower()
+  } finally {
+    $sha.Dispose()
+  }
   if ($got -ne $want.ToLower()) { throw "sha256 mismatch for $asset (wanted $want, got $got)" }
   Write-Host "+ sha256 verified"
 
