@@ -284,26 +284,60 @@ export async function compactMessages(
   const older = turns.slice(0, turns.length - keepTurns).flat();
   const recent = turns.slice(turns.length - keepTurns).flat();
 
-  const res = await runInContext({ cwd: process.cwd(), env: {}, todos: [], cache: "off" }, () =>
-    client.messages.create(
-      {
-        model: modelId,
-        max_tokens: 4000,
-        system: [{ type: "text", text: SUMMARY_SYSTEM }],
-        messages: [{ role: "user", content: renderTranscript(older) }],
-      },
-      { signal: abortSignal },
-    ),
-  );
-  const summary = res.content
-    .filter((b): b is Anthropic.Messages.TextBlock => b.type === "text")
-    .map((b) => b.text)
-    .join("")
-    .trim();
-  // max_tokens is a successful response with a truncated body: installing it
-  // would replace the conversation with a summary that stops mid-sentence.
+  const runSummary = (maxTokens: number) =>
+    runInContext({ cwd: process.cwd(), env: {}, todos: [], cache: "off" }, () =>
+      client.messages.create(
+        {
+          model: modelId,
+          max_tokens: maxTokens,
+          system: [{ type: "text", text: SUMMARY_SYSTEM }],
+          messages: [{ role: "user", content: renderTranscript(older) }],
+        },
+        { signal: abortSignal },
+      ),
+    );
+  const extract = (r: Awaited<ReturnType<typeof runSummary>>): string =>
+    r.content
+      .filter((b): b is Anthropic.Messages.TextBlock => b.type === "text")
+      .map((b) => b.text)
+      .join("")
+      .trim();
+
+  // First attempt at the cheap default budget. A very large session's
+  // transcript cannot fit a 4k-token summary (issue #6: a 990-message session
+  // bricked itself this way — every retry re-ran the ~150k-input-token call
+  // and failed the same way), so escalate ONCE to a 64k output budget before
+  // giving up on a summary entirely.
+  let res = await runSummary(4000);
+  let summary = extract(res);
   if (res.stop_reason === "max_tokens") {
-    throw new Error("the summarizer hit its output limit (max_tokens) — the session was left unchanged");
+    res = await runSummary(64_000);
+    summary = extract(res);
+  }
+
+  // max_tokens is a successful response with a truncated body: installing it
+  // would replace the conversation with a summary that stops mid-sentence
+  // (F602). If even the 64k budget could not finish, recover MECHANICALLY
+  // instead — drop the older turns behind an explicitly-labeled placeholder so
+  // the session becomes usable again; the truncated summary text is never
+  // installed, and the full original is archived by replaceMessages.
+  if (res.stop_reason === "max_tokens") {
+    const next: AgentMessage[] = [
+      {
+        role: "user",
+        content: `[Session recovery] The earlier part of this session (${older.length} messages) exceeded every summary budget, so those turns were dropped to make the session usable again. No summary of them is available; the full original conversation was archived next to the session files. Continue from the turns below.`,
+      },
+      { role: "assistant", content: SUMMARY_ACK },
+      ...recent,
+    ];
+    return {
+      messages: next,
+      summary: "",
+      messages_before: messages.length,
+      messages_after: next.length,
+      turns_summarized: turns.length - keepTurns,
+      turns_kept: keepTurns,
+    };
   }
   if (!summary) throw new Error("the model returned an empty summary");
 

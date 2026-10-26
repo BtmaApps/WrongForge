@@ -15,6 +15,16 @@ package.json and the git tags that drive the release workflow.
   `clear_at` guard could ever trigger. Cached input (read + write) is now
   included, so the reported context size is the true next-request prompt
   size. Found and reported by korlog (#5).
+- **A very large session could brick itself permanently: once its
+  transcript outgrew the summarizer's 4k-token output budget, every
+  compaction attempt failed with the same error forever** (each retry
+  re-running the expensive summarizer; every task on the session failing
+  `context_overflow`; `/compact` returning 502). The summarizer now
+  escalates once to a 64k output budget, and if even that cannot finish it
+  recovers mechanically: the oldest turns are dropped behind an explicit
+  "[Session recovery] …" placeholder (the full original conversation is
+  archived next to the session files) instead of installing a truncated
+  summary or throwing. Found and reported by korlog (#6).
 
 ## [0.4.13] — 2026-10-23
 

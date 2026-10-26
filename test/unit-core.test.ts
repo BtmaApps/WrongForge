@@ -115,6 +115,40 @@ async function main(): Promise<void> {
   }
   assert(threw, "compactMessages: empty summary throws");
 
+  // F1402: a summary that cannot fit the 4k budget no longer bricks the
+  // session — the summarizer escalates ONCE to a 64k budget, and if even that
+  // hits max_tokens a mechanical recovery (explicit placeholder + archived
+  // originals) runs instead of throwing forever. The truncated summary text
+  // is never installed (F602's invariant).
+  const calls: number[] = [];
+  const escalateClient = {
+    messages: {
+      create: async (params: { max_tokens: number }) => {
+        calls.push(params.max_tokens);
+        const fits = params.max_tokens >= 64_000;
+        return {
+          stop_reason: fits ? "end_turn" : "max_tokens",
+          content: [{ type: "text", text: fits ? "real summary" : "truncat" }],
+        };
+      },
+    },
+  } as unknown as Anthropic;
+  const escalated = await compactMessages(escalateClient, "m", msgs, 1);
+  assert(
+    escalated?.summary === "real summary" && calls.join(",") === "4000,64000",
+    `compactMessages: escalates once to a 64k budget when 4000 cannot fit (calls: ${calls.join(",")})`,
+  );
+  const neverFits = {
+    messages: {
+      create: async () => ({ stop_reason: "max_tokens", content: [{ type: "text", text: "truncat" }] }),
+    },
+  } as unknown as Anthropic;
+  const recovered = await compactMessages(neverFits, "m", msgs, 1);
+  assert(
+    recovered !== null && recovered.summary === "" && JSON.stringify(recovered.messages).includes("archived"),
+    "compactMessages: an unsummarizable session recovers mechanically — no throw, no truncated summary installed",
+  );
+
   const cfg = contextConfigFromEnv({
     WRONGFORGE_CONTEXT_WINDOW: "2000",
     WRONGFORGE_COMPACT_AT: "0",
