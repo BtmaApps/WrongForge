@@ -622,7 +622,8 @@ Environment variables (all optional unless noted):
 | `ANTHROPIC_API_KEY` | Use a console API key instead of OAuth (no Claude Code signature) |
 | `CLAUDE_TOKEN_STORE` | Token file path |
 | `ANTHROPIC_BASE_URL` | Different API root (proxy/mock). Also disables the bootstrap call |
-| `ANTHROPIC_TOKEN_URL`, `CLAUDE_OAUTH_*` | OAuth endpoints / client registration overrides (`CLIENT_ID`, `AUTHORIZE_URL`, `TOKEN_URL`, `REDIRECT_URI`, `SCOPE`); `CLAUDE_OAUTH_CONFIG` = config file path |
+| `ANTHROPIC_TOKEN_URL`, `CLAUDE_OAUTH_*`, `ANTHROPIC_AUTHORIZE_URL` | OAuth endpoints / client registration overrides (`CLIENT_ID`, `AUTHORIZE_URL`, `TOKEN_URL`, `REDIRECT_URI`, `SCOPE`); `CLAUDE_OAUTH_CONFIG` = config file path |
+| `CLAUDE_CREDENTIALS_FILE` | Path of the Claude Code credentials file `import` reads (default `~/.claude/.credentials.json`) |
 | `AGENT_API_KEY` | Server Bearer key (≥ 16 chars). Unset → saved/generated key |
 | `PORT` / `HOST` | Server listen port (8787) / address (127.0.0.1) |
 | `WRONGFORGE_PROXY` | Anthropic-compatible `/v1/messages` + `/v1/models` proxy surface (`0` disables; on by default) |
@@ -645,7 +646,13 @@ Environment variables (all optional unless noted):
 | `WRONGFORGE_LOG_COMPRESS_AFTER_DAYS` / `_LOG_RETENTION_DAYS` / `_TASK_COMPRESS_AFTER_DAYS` / `_TASK_RETENTION_DAYS` / `_SESSION_RETENTION_DAYS` / `_MAINTENANCE_INTERVAL_MIN` | Housekeeping (defaults 1 / 30 / 3 / 90 / 0 = keep / 60; `0` disables a step) |
 | `WRONGFORGE_AUTO_UPDATE` | `1` installs a newer release automatically once idle (compiled binary only; off by default — see [Releases](docs/RELEASE.md)) |
 | `WRONGFORGE_AUTO_UPDATE_POLL_MS` | How often the idle+update-available condition is checked (2 min) |
+| `WRONGFORGE_SUPERVISED_CHILD` | Set automatically on the supervisor's child process — never set it by hand |
+| `WRONGFORGE_UPDATE_REPO` | Repo the update checks download from (default `WrongStack/WrongForge`; mainly for tests) |
 | `WRONGFORGE_SUPERVISE` | `1` runs `serve` under a crash-restart supervisor with capped exponential backoff (off by default) |
+| `WRONGFORGE_CC_RECOVERY` | `0` disables the automatic recovery that adopts a live Claude Code session when a token refresh fails |
+| `WRONGFORGE_COUNT_TOKENS` | `0` disables the informational `count_tokens` preflight before streaming turns |
+| `WRONGFORGE_ALLOW_PRIVATE_URLS` | `1` lets `web_fetch` reach private/loopback addresses (the SSRF guard is otherwise unconditional) |
+| `WRONGFORGE_DEBUG` | `1` shows the full crash stack instead of the one-line message |
 | `NO_COLOR` | Plain startup banner |
 
 ## Data directory
@@ -699,7 +706,8 @@ usage, maintenance), `unit-net` (network-facing helpers), `unit-final` and `cli`
   unauthenticated routes; every `/v1/*` route needs the key.
 - `web_fetch` refuses non-public addresses and embedded credentials, but it
   resolves DNS separately from the request, so it is not hardened against DNS
-  rebinding.
+  rebinding. (`WRONGFORGE_ALLOW_PRIVATE_URLS=1` lifts the private-address
+  guard entirely — only for networks where that is the point.)
 - Gateway tokens/headers and task `env` values are never persisted (only their
   names are); logs mask secrets.
 

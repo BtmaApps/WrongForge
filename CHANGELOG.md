@@ -6,6 +6,14 @@ package.json and the git tags that drive the release workflow.
 
 ## [Unreleased]
 
+### Documentation
+- **README's environment table now covers every variable the code reads** —
+  eight were undocumented: `ANTHROPIC_AUTHORIZE_URL`, `CLAUDE_CREDENTIALS_FILE`,
+  `WRONGFORGE_ALLOW_PRIVATE_URLS` (the `web_fetch` private-address guard
+  override, now also noted in Security notes), `WRONGFORGE_CC_RECOVERY`,
+  `WRONGFORGE_COUNT_TOKENS`, `WRONGFORGE_DEBUG`, `WRONGFORGE_SUPERVISED_CHILD`
+  (set automatically by the supervisor) and `WRONGFORGE_UPDATE_REPO`.
+
 ## [0.4.14] — 2026-10-26
 
 ### Fixed
