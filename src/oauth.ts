@@ -47,6 +47,14 @@ export const PROTOCOL = {
  * class everywhere — a generic `anthropic` UA on the token endpoint gets
  * 429-rate-limited while the real client refreshes freely with the same
  * account, IP and client id (issue #3).
+ *
+ * The literal is frozen at 2.1.300 on purpose: since 2.1.310 real CC no
+ * longer carries a complete UA literal (it is assembled at runtime from the
+ * build's VERSION constant — verified again in the 2.1.312 carve), and this
+ * 2.1.300-era string has been accepted by both endpoints for weeks. If
+ * Anthropic ever starts clamping client versions, the first symptom is the
+ * keep-alive requests failing — upgrading this one line to the current
+ * assembly (`claude-cli/<v> (external, cli)`) is the whole fix.
  */
 export const CLAUDE_CODE_UA = "claude-cli/2.1.300 (external, sdk-cli)";
 
