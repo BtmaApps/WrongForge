@@ -27,6 +27,13 @@ import { ClaudeOAuth } from "../../src/oauth.js";
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+// Timestamps must be monotonic AND finer than a millisecond: with Date.now()
+// a call's end and the next poller call's start can land in the same
+// millisecond under CI load, and the sweep-line's starts-before-ends
+// tie-break then counts the two half-open intervals as overlapping
+// (F1503: a false maxConcurrent=2 on correct single-flight code).
+const now = (): bigint => process.hrtime.bigint();
+
 const presignIn = new ClaudeOAuth(process.env.CLAUDE_TOKEN_STORE);
 await presignIn.exchangeCode("code", "verifier", "https://console.anthropic.com/oauth/code/callback", "user:inference user:profile");
 
@@ -38,7 +45,7 @@ const delayMs = Number(process.env.F963_DELAY_MS ?? 0);
 // tested). The driver only looks at calls that started after the marker
 // below, so the startup announceUpdate() check is excluded without ever
 // mutating shared state concurrently with it.
-const calls: { start: number; end: number }[] = [];
+const calls: { start: bigint; end: bigint }[] = [];
 const newer: ReleaseInfo = {
   current: "0.0.1",
   latest: "99.0.0",
@@ -48,10 +55,10 @@ const newer: ReleaseInfo = {
 };
 setIsCompiledBinaryForTest(true);
 setLatestReleaseForTest(async () => {
-  const rec = { start: Date.now(), end: -1 };
+  const rec = { start: now(), end: -1n };
   calls.push(rec);
   if (delayMs > 0) await sleep(delayMs);
-  rec.end = Date.now();
+  rec.end = now();
   return newer;
 });
 
@@ -62,7 +69,7 @@ const started = await startEnvServer();
 const t0 = Date.now();
 while (!lastUpdateCheck() && Date.now() - t0 < 5000) await sleep(25);
 if (!lastUpdateCheck()) throw new Error("startup update check never completed");
-const idlePollMarker = Date.now(); // calls starting at/after this are the idle poller's, not the startup check's
+const idlePollMarker = now(); // calls starting at/after this are the idle poller's, not the startup check's
 
 // WRONGFORGE_AUTO_UPDATE_POLL_MS (set by the caller, short) ticks repeatedly
 // while the server sits idle; wait long enough for several ticks to fire
@@ -78,13 +85,13 @@ await started.shutdown();
 // Sweep-line: compute the maximum number of [start,end) intervals that were
 // simultaneously open, restricted to calls attributable to the idle poller.
 const relevant = calls.filter((c) => c.start >= idlePollMarker);
-type Edge = [time: number, delta: number];
+type Edge = [time: bigint, delta: number];
 const edges: Edge[] = [];
 for (const c of relevant) {
   edges.push([c.start, 1]);
-  edges.push([c.end === -1 ? Date.now() : c.end, -1]);
+  edges.push([c.end === -1n ? now() : c.end, -1]);
 }
-edges.sort((a, b) => a[0] - b[0] || b[1] - a[1]); // starts before ends at the same instant, so a near-instant call still registers
+edges.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : b[1] - a[1])); // starts before ends at the same instant, so a near-instant call still registers
 let running = 0;
 let maxConcurrent = 0;
 for (const [, delta] of edges) {

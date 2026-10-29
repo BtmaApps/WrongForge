@@ -6,6 +6,15 @@ package.json and the git tags that drive the release workflow.
 
 ## [0.4.15] — 2026-10-29
 
+### Fixed
+- **The auto-update re-entrancy verifier could fail spuriously on CI.** The
+  F963 sweep-line measured call intervals with `Date.now()`: when one call's
+  end and the next poller call's start landed in the same millisecond, the
+  starts-before-ends tie-break counted the two half-open intervals as
+  overlapping and reported a false `maxConcurrent=2` on correct single-flight
+  code. Timestamps are now `process.hrtime.bigint()` (nanosecond, monotonic);
+  the guard itself was never wrong.
+
 ### Documentation
 - **README's environment table now covers every variable the code reads** —
   eight were undocumented: `ANTHROPIC_AUTHORIZE_URL`, `CLAUDE_CREDENTIALS_FILE`,
