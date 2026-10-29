@@ -13,6 +13,9 @@ package.json and the git tags that drive the release workflow.
   override, now also noted in Security notes), `WRONGFORGE_CC_RECOVERY`,
   `WRONGFORGE_COUNT_TOKENS`, `WRONGFORGE_DEBUG`, `WRONGFORGE_SUPERVISED_CHILD`
   (set automatically by the supervisor) and `WRONGFORGE_UPDATE_REPO`.
+- **TASKS-API.md's HTTP error table now lists `404 unknown_server`** — the
+  code an MCP call returns when the named server does not exist (already
+  documented in MCP.md; the protocol reference's table simply missed it).
 
 ## [0.4.14] — 2026-10-26
 

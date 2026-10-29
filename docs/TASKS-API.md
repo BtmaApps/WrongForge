@@ -453,7 +453,7 @@ Errors have the shape `{ "error": { "code": "…", "message": "…" } }`.
 | 400 | `invalid_json`, `invalid_request`, `workdir_required`, `invalid_workdir`, `invalid_gateway`, `unknown_mcp_server`, `callbacks_disabled`, `invalid_mcp_config` |
 | 401 | `unauthorized` (`WWW-Authenticate: Bearer`) |
 | 403 | `workdir_not_allowed` |
-| 404 | `not_found`, `task_not_found`, `session_not_found`, `no_such_session`, `mcp_server_not_found`, `mcp_tool_not_found` |
+| 404 | `not_found`, `task_not_found`, `session_not_found`, `no_such_session`, `mcp_server_not_found`, `mcp_tool_not_found`, `unknown_server` (MCP) |
 | 409 | `task_id_conflict`, `session_exists`, `session_busy`, `server_disabled` (MCP) |
 | 413 | `body_too_large` |
 | 500 | `internal_error` |
