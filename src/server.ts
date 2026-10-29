@@ -757,7 +757,11 @@ export function createAgentServer(opts: ServerOptions): http.Server {
         if (parts.length === 3 && method === "GET") {
           const task = manager.get(id);
           if (!task) throw taskNotFound(id);
-          return json(res, 200, { task });
+          // A queued task's wait is only useful if it is observable: the live
+          // position and block reason ride along while status is "queued"
+          // (issue #7 — a task can sit in the queue for minutes in silence).
+          const qi = task.status === "queued" ? manager.queueInfoOf(id) : undefined;
+          return json(res, 200, qi ? { task, queue_position: qi.position, waiting_for: qi.waiting_for } : { task });
         }
         if (parts.length === 4 && parts[3] === "events" && method === "GET") return taskEvents(req, res, id, url);
         if (parts.length === 4 && parts[3] === "cancel" && method === "POST") {

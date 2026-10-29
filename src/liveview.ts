@@ -88,6 +88,7 @@ export function describeEvent(ev: TaskEvent): string {
   const s = (v: unknown): string => (typeof v === "string" ? v : "");
   switch (ev.type) {
     case "task.queued":
+    case "task.queue_update":
       return `position ${String(d.position ?? 0)}${d.waiting_for ? ` · waiting: ${s(d.waiting_for)}` : ""}`;
     case "task.started":
       return `${s(d.model)} · effort ${s(d.effort) || "—"} · ${s(d.workdir)}`;

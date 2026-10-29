@@ -107,6 +107,60 @@ async function main(): Promise<void> {
     // default workdir: optional when the server has one
     await h.close();
   }
+
+  // =============================================================== low-priority reservation + queue visibility (issue #7)
+  {
+    const h = await startHarness({ app: { maxConcurrency: 2, defaultWorkdir: undefined } });
+    const d = h.mkdir("prio");
+
+    // Two normal tasks take both slots; a low-priority helper queues instead
+    // of taking the last slot the moment one frees.
+    const n1 = await submit(h, { workdir: d, prompt: "[[delay 300]] [[say n1]]" });
+    const n2 = await submit(h, { workdir: d, prompt: "[[delay 1800]] [[say n2]]" });
+    const h1 = await submit(h, { workdir: d, prompt: "[[say helper]]", priority: "low" });
+    assert(h1.priority === "low", "priority: low is stored on the record");
+
+    const badPrio = await h.api("POST", "/v1/tasks", { workdir: d, prompt: "x", priority: "high" });
+    assert(badPrio.status === 400 && badPrio.body.error.code === "invalid_request", "priority must be low|normal -> 400");
+
+    const st = (await h.api("GET", `/v1/tasks/${h1.id}`)).body;
+    assert(st.task.status === "queued" && st.queue_position === 0 && st.waiting_for === "capacity", "GET reports queue_position + waiting_for while queued");
+    const stRun = (await h.api("GET", `/v1/tasks/${n1.id}`)).body;
+    assert(stRun.queue_position === undefined && stRun.waiting_for === undefined, "non-queued tasks carry no queue fields");
+
+    await h.waitTask(n1.id);
+    // n2 still holds a slot: the reservation keeps the helper queued even
+    // though "one slot is free" from a normal task's point of view
+    const mid = (await h.api("GET", `/v1/tasks/${h1.id}`)).body;
+    assert(mid.task.status === "queued" && mid.waiting_for === "capacity", "low-priority task keeps out of the last slot while a normal task runs");
+
+    await h.waitTask(h1.id);
+    const done = (await h.api("GET", `/v1/tasks/${n2.id}`)).body.task;
+    assert(done.status === "completed", "the other normal task completed normally");
+    await h.close();
+  }
+  {
+    // queue_update: a queued task's position/waiting_for changes are announced
+    const h = await startHarness({ app: { maxConcurrency: 1, defaultWorkdir: undefined } });
+    const d = h.mkdir("qup");
+    const t1 = await submit(h, { workdir: d, prompt: "[[delay 500]] [[say one]]" });
+    const t2 = await submit(h, { workdir: d, prompt: "[[say two]]" });
+    const t3 = await submit(h, { workdir: d, prompt: "[[say three]]" });
+    await h.api("POST", `/v1/tasks/${t2.id}/cancel`, { reason: "make room" });
+    const upd = (await h.events(t3.id)).find((e: any) => e.type === "task.queue_update");
+    assert(upd && upd.data.position === 0 && upd.data.waiting_for === "capacity", `queue_update announces the new position/wait (got ${JSON.stringify(upd?.data)})`);
+    await h.waitTask(t1.id);
+    await h.waitTask(t3.id);
+
+    // max_concurrency 1: a low-priority task never starts (the reservation
+    // would need a slot that does not exist) — documented edge, cancel works
+    const lone = await submit(h, { workdir: d, prompt: "[[say lone]]", priority: "low" });
+    await sleep(400);
+    const loneSt = (await h.api("GET", `/v1/tasks/${lone.id}`)).body;
+    assert(loneSt.task.status === "queued" && loneSt.waiting_for === "capacity", "max=1: a low-priority task cannot start at all");
+    await h.api("POST", `/v1/tasks/${lone.id}/cancel`, {});
+    await h.close();
+  }
   {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "wrongforge-dw-"));
     const dflt = path.join(home, "work", "default");
@@ -343,7 +397,7 @@ async function main(): Promise<void> {
     }
   }
 
-  console.log("TASKS CONCURRENCY TESTS PASSED ✓ (parallel isolation, env, heartbeat, queue, sessions, locks, no starvation, cancel, timeout, allowed roots, webhooks, shutdown, live feed)");
+  console.log("TASKS CONCURRENCY TESTS PASSED ✓ (parallel isolation, env, heartbeat, queue, priority reservation, queue visibility, sessions, locks, no starvation, cancel, timeout, allowed roots, webhooks, shutdown, live feed)");
 }
 
 main().then(

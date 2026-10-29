@@ -164,6 +164,8 @@ export class TaskManager {
     ManagerOptions;
   private live = new Map<string, Live>();
   private queue: string[] = [];
+  /** Last (position, waiting_for) pair announced per queued task — see pump(). */
+  private lastQueue = new Map<string, { position: number; waiting_for: "capacity" | "session" | "workdir" | null }>();
   private running = new Set<string>();
   private activeSessions = new Set<string>();
   private seqs = new Map<string, number>();
@@ -325,6 +327,10 @@ export class TaskManager {
     }
     const effort: EffortSetting = req.effort ?? defaultEffort();
 
+    if (req.priority !== undefined && req.priority !== "low" && req.priority !== "normal") {
+      bad("invalid_request", '`priority` must be "low" or "normal"');
+    }
+
     const env: Record<string, string> = {};
     if (req.env !== undefined) {
       if (typeof req.env !== "object" || req.env === null || Array.isArray(req.env)) bad("invalid_request", "`env` must be an object of strings");
@@ -416,6 +422,7 @@ export class TaskManager {
       timeout_ms: timeoutMs,
       cache,
       effort,
+      ...(req.priority === "low" ? { priority: "low" as const } : {}),
       workdir,
       workdir_lock: workdirLock,
       env_keys: Object.keys(env),
@@ -431,6 +438,7 @@ export class TaskManager {
     o.store.put(rec);
     o.logger.info("task.submitted", {
       task_id: id, session_id: sessionId, session_created: sessionCreated, model, workdir, workdir_lock: workdirLock, cache, effort,
+      priority: rec.priority ?? "normal",
       max_steps: maxSteps, timeout_ms: timeoutMs, env_keys: rec.env_keys, has_callback: Boolean(rec.callback),
       prompt: rec.prompt, context: rec.context,
     });
@@ -448,6 +456,8 @@ export class TaskManager {
       session_created: sessionCreated,
       workdir,
     });
+    // task.queued already announced this state — don't repeat it on the next pump
+    this.lastQueue.set(id, { position: this.queue.length - 1, waiting_for: this.blockReason(rec) });
     this.pump();
     return { task: rec, deduplicated: false };
   }
@@ -568,7 +578,7 @@ export class TaskManager {
     const holdSessions = new Set<string>();
     const holdDirs = new Set<string>();
     for (let i = 0; i < this.queue.length; ) {
-      if (this.running.size >= this.o.maxConcurrency) return;
+      if (this.running.size >= this.o.maxConcurrency) break;
       const id = this.queue[i]!;
       const rec = this.o.store.get(id)!;
       const key = dirKey(rec.workdir);
@@ -579,6 +589,7 @@ export class TaskManager {
         continue;
       }
       this.queue.splice(i, 1);
+      this.lastQueue.delete(id);
       this.running.add(id);
       this.activeSessions.add(rec.session_id);
       void this.execute(id).catch((e) => {
@@ -589,11 +600,27 @@ export class TaskManager {
         }
       });
     }
+    // A queued task's position and block reason change only when the queue or
+    // the running set changes — exactly the moments that reach this method.
+    // Announce every QUEUED task whose (position, waiting_for) pair moved so
+    // clients watching the event stream see queue progress without polling
+    // (issue #7: a task can sit in the queue for minutes in total silence).
+    this.queue.forEach((id, position) => {
+      const waiting = this.blockReason(this.o.store.get(id)!);
+      const prev = this.lastQueue.get(id);
+      if (prev && prev.position === position && prev.waiting_for === waiting) return;
+      this.lastQueue.set(id, { position, waiting_for: waiting });
+      this.emit(id, "task.queue_update", { position, waiting_for: waiting, priority: this.o.store.get(id)!.priority ?? "normal" });
+    });
   }
 
   /**
    * Why `rec` cannot start right now (null = it can):
-   *  - capacity: all slots are busy
+   *  - capacity: all slots are busy — or, for a low-priority task, all but the
+   *    one slot every server keeps free for normal tasks (issue #7: helper
+   *    tasks submitted as `priority: "low"` may fill at most
+   *    max_concurrency - 1 slots, so the leader's next model call always has
+   *    a slot to take)
    *  - session:  another task of the same session is running
    *  - workdir:  another task runs in the same workdir and one of the two wants exclusivity
    */
@@ -604,8 +631,19 @@ export class TaskManager {
       const r = this.o.store.get(rid)!;
       if (dirKey(r.workdir) === key && (rec.workdir_lock || r.workdir_lock)) return "workdir";
     }
-    if (this.running.size >= this.o.maxConcurrency) return "capacity";
+    const limit = rec.priority === "low" ? this.o.maxConcurrency - 1 : this.o.maxConcurrency;
+    if (this.running.size >= limit) return "capacity";
     return null;
+  }
+
+  /**
+   * Live queue facts for one still-queued task — what GET /v1/tasks/:id
+   * reports as `queue_position` / `waiting_for` while status is "queued".
+   */
+  queueInfoOf(id: string): { position: number; waiting_for: "capacity" | "session" | "workdir" | null } | undefined {
+    const position = this.queue.indexOf(id);
+    if (position < 0) return undefined;
+    return { position, waiting_for: this.blockReason(this.o.store.get(id)!) };
   }
 
   private async execute(id: string): Promise<void> {
@@ -1182,6 +1220,7 @@ export class TaskManager {
     this.activeSessions.delete(rec.session_id);
     this.seqs.delete(id);
     this.live.delete(id);
+    this.lastQueue.delete(id);
     live?.resolveDone();
     this.pump();
   }

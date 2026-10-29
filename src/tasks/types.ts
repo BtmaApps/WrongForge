@@ -107,6 +107,13 @@ export interface TaskRecord {
    * sent). Absent only on records persisted before the field existed.
    */
   effort?: EffortSetting;
+  /**
+   * Queue priority. Only "low" is recorded; an absent field means "normal".
+   * Low-priority tasks keep the last concurrency slot free for normal tasks
+   * (issue #7: helper tasks filling every slot starved the leader's next
+   * model call until the client timed out) — see manager.ts's blockReason.
+   */
+  priority?: "low";
   /** Names only — values are never persisted. */
   env_keys: string[];
   system_append?: string;
@@ -134,6 +141,7 @@ export interface TaskRecord {
 
 export type TaskEventType =
   | "task.queued"
+  | "task.queue_update"
   | "task.started"
   | "task.heartbeat"
   | "task.completed"
@@ -192,6 +200,13 @@ export interface SubmitRequest {
    * no effort support never receive the field.
    */
   effort?: EffortSetting;
+  /**
+   * Queue priority: "low" | "normal" (default "normal"). Low-priority tasks
+   * keep the last concurrency slot free for normal tasks, so a fleet of
+   * helper tasks can never starve interactive work (issue #7). With
+   * max_concurrency 1 a low-priority task effectively never starts.
+   */
+  priority?: "low" | "normal";
   env?: Record<string, string>;
   system_append?: string;
   context?: unknown;

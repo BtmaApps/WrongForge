@@ -69,6 +69,7 @@ Submits a task. Body (JSON object):
 | `workdir_lock` | boolean | `WRONGFORGE_WORKDIR_LOCK` or `false` | Exclusive use of the workdir (see [Concurrency](#concurrency)). |
 | `cache` | `"5m"` \| `"1h"` \| `"off"` | `WRONGFORGE_CACHE` or `"1h"` | Prompt-cache lifetime for this task's requests. |
 | `effort` | `"low"` \| `"medium"` \| `"high"` \| `"off"` | `WRONGFORGE_EFFORT` or `"high"` | Reasoning effort for this task's requests. Clamped to the levels the model supports; models without effort support never receive the field; `"off"` never sends it. |
+| `priority` | `"low"` \| `"normal"` | `"normal"` | Queue priority. Low-priority tasks keep the last concurrency slot free for normal tasks, so a fleet of helper tasks can never starve interactive work (with `max_concurrency` 1 a low-priority task effectively never starts). Submit fleet/helper tasks as `"low"` and keep interactive tasks `"normal"`. |
 | `env` | object of strings | `{}` | Extra environment variables for the `bash` tool. ≤ 50 entries, names `[A-Za-z_][A-Za-z0-9_]{0,99}`, values ≤ 8192 chars. **Values are never persisted or logged** — only the names (`env_keys`). |
 | `system_append` | string | – | Extra instructions appended to the system prompt, ≤ 20 000 chars. |
 | `context` | any JSON | – | Opaque data echoed back untouched in the task document. |
@@ -210,6 +211,19 @@ Submit-time errors (HTTP `400` unless noted), `error.code` in the response body:
   locked task also holds back later tasks of the same directory (no starvation).
 - `task.queued` says why a task cannot start yet: `data.waiting_for` is
   `"capacity"`, `"session"`, `"workdir"` or `null` (starts immediately).
+- Low-priority tasks (`priority: "low"`) additionally keep the last slot free
+  for normal tasks: they may start only while fewer than
+  `max_concurrency - 1` tasks run. Submit orchestrator helper/fleet tasks as
+  `"low"` so a burst of them can never occupy every slot and starve the
+  interactive task that spawned them.
+- A queued task's wait is observable without polling: every time its position
+  or block reason changes it emits `task.queue_update`, and
+  `GET /v1/tasks/:id` reports `queue_position` and `waiting_for` alongside the
+  task document while status is `"queued"`.
+- There is **no server-side queue timeout**: a queued task waits until a slot
+  frees or it is cancelled. If your client enforces its own wait deadline
+  (e.g. an HTTP timeout that turns the wait into a 408), either raise it,
+  cancel the task, or submit the burst of helpers as `priority: "low"`.
 
 Queue state is visible in `GET /health` (`queued`, `running`) and `GET /v1/info`.
 
@@ -223,6 +237,7 @@ Queue state is visible in `GET /health` (`queued`, `running`) and `GET /v1/info`
 | Type | `data` (main fields) |
 |---|---|
 | `task.queued` | `position`, `waiting_for`, `session_id`, `session_created`, `workdir` |
+| `task.queue_update` | `position`, `waiting_for`, `priority` — emitted whenever a still-queued task's position or block reason changes (queue shifts, capacity frees up) |
 | `task.started` | `model`, `workdir`, `session_id`, `session_created`, `resumed_messages`, `context_tokens`, `cache`, `effort`, `max_steps`, `timeout_ms`, and `session_workdir_changed_from` when the session last worked in another directory |
 | `task.heartbeat` | `elapsed_ms`, `steps`, `tool_calls`, `current_tool`, `last_activity_at` |
 | `task.completed` | `result` |
@@ -378,7 +393,10 @@ pass `next_before` as `before` for the next page (`null` = no more).
 
 ### `GET /v1/tasks/:id`
 
-`{ "task": TaskRecord }`, or `404 task_not_found`.
+`{ "task": TaskRecord }`, or `404 task_not_found`. While the task is queued,
+the response also carries `queue_position` (0-based) and `waiting_for`
+(`"capacity"` / `"session"` / `"workdir"` / `null`) so a client can show why
+the task is waiting without subscribing to the event stream.
 
 ### `POST /v1/tasks/:id/cancel`
 

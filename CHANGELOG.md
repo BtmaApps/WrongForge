@@ -4,6 +4,23 @@ Notable changes to WrongForge. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions match
 package.json and the git tags that drive the release workflow.
 
+## [Unreleased]
+
+### Added
+- **`priority: "low"` on task submit keeps the last concurrency slot free for
+  normal tasks (issue #7).** Helper/fleet tasks submitted as `"low"` may fill
+  at most `max_concurrency - 1` slots, so a burst of them can no longer occupy
+  every slot and starve the interactive task that spawned them until the
+  client's own timeout turned the wait into a hard 408. `normal` (the
+  default) is unchanged. With `max_concurrency` 1 a low-priority task
+  effectively never starts (documented edge). Found and reported by korlog.
+- **A queued task's wait is now observable.** Every time a still-queued task's
+  position or block reason changes it emits a `task.queue_update` event
+  (`position`, `waiting_for`, `priority`), and `GET /v1/tasks/:id` reports
+  `queue_position` and `waiting_for` alongside the task document while status
+  is `"queued"` — previously the only signal was the one-time `task.queued`
+  event, so a task could sit in the queue for minutes in total silence.
+
 ## [0.4.15] — 2026-10-29
 
 ### Fixed
