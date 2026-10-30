@@ -10,7 +10,7 @@ import * as path from "node:path";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import { ClaudeOAuth, CLAUDE_CODE_UA, parsePastedCode, setKeychainReaderForTest } from "../src/oauth.js";
-import { oauthFetch } from "../src/provider.js";
+import { maxRetriesFromEnv, oauthFetch } from "../src/provider.js";
 import { runInContext } from "../src/context.js";
 
 // Temp dirs live under the OS temp dir and are removed on exit (pass or fail).
@@ -28,6 +28,16 @@ process.on("exit", () => {
 function check(cond: unknown, label: string): void {
   if (!cond) throw new Error(`assertion failed: ${label}`);
 }
+
+// --- maxRetriesFromEnv: unset/default/clamped ---
+check(maxRetriesFromEnv({}) === 2, "default is the SDK's 2");
+check(maxRetriesFromEnv({ WRONGFORGE_MAX_RETRIES: "5" }) === 5, "env value taken");
+check(maxRetriesFromEnv({ WRONGFORGE_MAX_RETRIES: "0" }) === 0, "0 disables retries");
+check(maxRetriesFromEnv({ WRONGFORGE_MAX_RETRIES: "99" }) === 10, "clamped high to 10");
+check(maxRetriesFromEnv({ WRONGFORGE_MAX_RETRIES: "-3" }) === 0, "clamped low to 0");
+check(maxRetriesFromEnv({ WRONGFORGE_MAX_RETRIES: "abc" }) === 2, "garbage falls back to the default");
+check(maxRetriesFromEnv({ WRONGFORGE_MAX_RETRIES: "" }) === 2, "empty falls back to the default");
+check(maxRetriesFromEnv({ WRONGFORGE_MAX_RETRIES: "2.9" }) === 2, "floored");
 
 // --- parsePastedCode: "code#state" is what the redirect page shows ---
 check(parsePastedCode("ABC", "S") === "ABC", "bare code accepted");
@@ -252,6 +262,22 @@ function main(): Promise<void> {
           reports.length = 0;
           const outside = await f(`${busyBase}/v1/messages`, post());
           check(outside.status === 503 && reports.length === 0, "outside a task context there is no report channel and no crash");
+
+          // WRONGFORGE_MAX_RETRIES moves the budget the messages quote (and
+          // createClaudeClient hands the SDK)
+          process.env.WRONGFORGE_MAX_RETRIES = "1";
+          reports.length = 0;
+          await runInContext({ cwd: process.cwd(), env: {}, todos: [], report: (r) => reports.push(r) }, async () => {
+            await f(`${busyBase}/v1/messages`, post());
+          });
+          check(reports.length === 1 && /\(1 left\)/.test(reports[0].message), `maxRetries=1: one retry left: ${reports[0].message}`);
+          process.env.WRONGFORGE_MAX_RETRIES = "0";
+          reports.length = 0;
+          await runInContext({ cwd: process.cwd(), env: {}, todos: [], report: (r) => reports.push(r) }, async () => {
+            await f(`${busyBase}/v1/messages`, post());
+          });
+          check(reports.length === 1 && /retries exhausted/.test(reports[0].message), `maxRetries=0: exhausted on the first attempt: ${reports[0].message}`);
+          delete process.env.WRONGFORGE_MAX_RETRIES;
 
           busy.close();
         }

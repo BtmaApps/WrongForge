@@ -156,6 +156,21 @@ async function claudeMetadataUserId(oauth: ClaudeOAuth): Promise<string> {
   return JSON.stringify({ device_id: device, account_uuid: account, session_id: SESSION_ID });
 }
 
+/**
+ * Client retries per model call (the SDK's). A busy backend answers
+ * 503/529 "model busy" and the SDK walks these attempts silently (see the
+ * retry-visibility report in oauthFetch); WRONGFORGE_MAX_RETRIES raises or
+ * lowers the budget. Default 2 (the SDK default), clamped to 0-10 — every
+ * retry re-sends the whole prompt, so more is not free.
+ */
+export function maxRetriesFromEnv(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.WRONGFORGE_MAX_RETRIES;
+  if (raw === undefined || raw === "") return 2;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return 2;
+  return Math.min(10, Math.max(0, Math.floor(n)));
+}
+
 function applyClientSignature(headers: Headers): void {
   headers.set("user-agent", CLAUDE_CODE_UA);
   headers.set("x-app", "cli");
@@ -547,7 +562,7 @@ export function oauthFetch(oauth: ClaudeOAuth): typeof globalThis.fetch {
       const attempt = Number(new Headers(init?.headers).get("x-stainless-retry-count") ?? 0);
       const retryAfter = Number(res.headers.get("retry-after"));
       const wait = Number.isFinite(retryAfter) && retryAfter > 0 ? `; server asked to wait ${retryAfter}s` : "";
-      const left = Math.max(0, 2 - attempt); // maxRetries: 2 in createClaudeClient
+      const left = Math.max(0, maxRetriesFromEnv() - attempt); // the same budget createClaudeClient hands the SDK
       currentContext()!.report!({
         phase: "retry",
         message:
@@ -580,7 +595,7 @@ export function createClaudeClient(oauth: ClaudeOAuth): Anthropic {
   if (apiKey) {
     return new Anthropic({
       apiKey,
-      maxRetries: 2,
+      maxRetries: maxRetriesFromEnv(),
       baseURL: normalizeBaseURL(process.env.ANTHROPIC_BASE_URL),
     });
   }
@@ -590,7 +605,7 @@ export function createClaudeClient(oauth: ClaudeOAuth): Anthropic {
   return new Anthropic({
     apiKey: "managed-by-oauth", // the real credential is injected by oauthFetch
     fetch: oauthFetch(oauth),
-    maxRetries: 2,
+    maxRetries: maxRetriesFromEnv(),
     // mock server for tests; defaults to api.anthropic.com in production
     baseURL: normalizeBaseURL(process.env.ANTHROPIC_BASE_URL),
   });

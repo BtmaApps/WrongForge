@@ -654,6 +654,7 @@ Environment variables (all optional unless noted):
 | `WRONGFORGE_COUNT_TOKENS` | `0` disables the informational `count_tokens` preflight before streaming turns |
 | `WRONGFORGE_ALLOW_PRIVATE_URLS` | `1` lets `web_fetch` reach private/loopback addresses (the SSRF guard is otherwise unconditional) |
 | `WRONGFORGE_DEBUG` | `1` shows the full crash stack instead of the one-line message |
+| `WRONGFORGE_MAX_RETRIES` | Client retries per model call when the backend answers 408/409/429/5xx (default 2, the SDK default; clamped 0–10 — every retry re-sends the whole prompt) |
 | `NO_COLOR` | Plain startup banner |
 
 ## Data directory
