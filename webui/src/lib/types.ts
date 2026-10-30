@@ -18,6 +18,8 @@ export interface TaskProgress {
   last_report?: { message: string; percent?: number; phase?: string; at: string };
   todos?: { content: string; status: string }[];
   last_activity_at: string;
+  /** Client-only, folded from task.queued/task.queue_update events (not part of the server's TaskRecord). */
+  queue_wait?: { position: number; waiting_for: string | null };
 }
 
 export interface TaskRecord {

@@ -13,6 +13,9 @@ package.json and the git tags that drive the release workflow.
   `retry-after` if any, and how many client retries remain — the SDK's own
   retries were silent, so a busy backend could leave a RUNNING task without a
   single event for minutes (the non-queue half of #7's incident).
+- **The dashboard's task rail shows why a queued task is waiting** — its
+  queue position and `waiting_for` reason, folded client-side from the
+  `task.queued` / `task.queue_update` events.
 
 ## [0.4.16] — 2026-10-30
 

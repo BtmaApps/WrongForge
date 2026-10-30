@@ -504,7 +504,10 @@ class Store {
               prompt: "",
               model: String(ev.data.model ?? ""),
               created_at: ev.ts,
-              progress: { last_event_seq: ev.seq, steps: 0, tool_calls: 0, last_activity_at: ev.ts },
+              progress: {
+                last_event_seq: ev.seq, steps: 0, tool_calls: 0, last_activity_at: ev.ts,
+                ...(ev.type === "task.queued" ? { queue_wait: { position: Number(ev.data.position ?? 0), waiting_for: (ev.data.waiting_for as string | null) ?? null } } : {}),
+              },
             } as TaskRecord);
           }
           break;
@@ -546,9 +549,16 @@ function mergeTask(snap: TaskRecord, live: TaskRecord): TaskRecord {
 function patchTask(doc: TaskRecord, ev: TaskEvent): TaskRecord {
   const d: TaskRecord = { ...doc, progress: { ...doc.progress, last_event_seq: ev.seq, last_activity_at: ev.ts } };
   switch (ev.type) {
+    case "task.queued":
+      d.progress.queue_wait = { position: Number(ev.data.position ?? 0), waiting_for: (ev.data.waiting_for as string | null) ?? null };
+      break;
+    case "task.queue_update":
+      d.progress.queue_wait = { position: Number(ev.data.position ?? 0), waiting_for: (ev.data.waiting_for as string | null) ?? null };
+      break;
     case "task.started":
       d.status = "running";
       d.started_at = ev.ts;
+      d.progress.queue_wait = undefined;
       break;
     case "task.completed":
     case "task.failed":
@@ -556,6 +566,7 @@ function patchTask(doc: TaskRecord, ev: TaskEvent): TaskRecord {
     case "task.timed_out":
       d.status = ev.type.split(".")[1] as TaskRecord["status"];
       d.finished_at = ev.ts;
+      d.progress.queue_wait = undefined;
       break;
     case "step.started":
       d.progress.steps = Math.max(d.progress.steps, Number(ev.data.step ?? 0));

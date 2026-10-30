@@ -81,6 +81,11 @@ export function TaskRail({ selectedId, onSelect }: { selectedId: string | null; 
               <span>{t.progress.steps} steps</span>
               <span>{t.progress.tool_calls} tools</span>
               {t.progress.current_tool && <span className="rail-now">↻ {t.progress.current_tool.name}</span>}
+              {t.status === "queued" && t.progress.queue_wait && (
+                <span className="rail-report" title="why this task is not running yet">
+                  #{t.progress.queue_wait.position + 1}{t.progress.queue_wait.waiting_for ? ` · waiting: ${t.progress.queue_wait.waiting_for}` : ""}
+                </span>
+              )}
               {t.progress.last_report && <span className="rail-report">{t.progress.last_report.message.slice(0, 40)}</span>}
             </div>
           </div>
