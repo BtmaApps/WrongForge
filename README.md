@@ -711,6 +711,10 @@ usage, maintenance), `unit-net` (network-facing helpers), `unit-final` and `cli`
   guard entirely — only for networks where that is the point.)
 - Gateway tokens/headers and task `env` values are never persisted (only their
   names are); logs mask secrets.
+- Named client keys (`AGENT_API_KEYS` / `api-keys.json`) scope tasks, sessions
+  and event feeds to their own work — but every key holder can drive the same
+  subscription and OAuth session, so hand keys out only to orchestrators you
+  trust with the plan itself.
 
 ## Known limitations
 

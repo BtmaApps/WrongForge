@@ -50,6 +50,7 @@ async function main(): Promise<void> {
       ["reserved name", { AGENT_API_KEYS: `default=${KEY_A}` }],
       ["short key", { AGENT_API_KEYS: `alpha=short` }],
       ["duplicate key", { AGENT_API_KEYS: `alpha=${KEY_A},beta=${KEY_A}` }],
+      ["collides with the default key", { AGENT_API_KEYS: `alpha=wf_default_key_0123456789` }],
       ["bad name", { AGENT_API_KEYS: `a b=${KEY_A}` }],
     ] as const) {
       let threw = false;

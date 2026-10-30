@@ -7,7 +7,7 @@
  *   GET    /v1/tasks/:id                   status + progress + result
  *   GET    /v1/tasks/:id/events            event log (JSON, long-poll, or SSE with replay)
  *   POST   /v1/tasks/:id/cancel            cancel
- *   GET    /v1/events                      live SSE feed of all tasks
+ *   GET    /v1/events                      live SSE feed (scoped per client key)
  *   *      /v1/sessions…                   durable conversations (+ compact)
  *   *      /v1/mcp/servers…                MCP server configuration
  *   POST   /v1/maintenance/run             log/task/session housekeeping now

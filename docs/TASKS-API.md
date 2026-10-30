@@ -341,7 +341,10 @@ data: {"task_id":"tsk_…","status":"completed"}
 
 ### `GET /v1/events`
 
-Live SSE feed of **all** tasks: `?task_id=` and `?session_id=` filter it. Events
+Live SSE feed of every task **the caller can see** — the `default` key sees
+all clients, a named client key only its own tasks (`http.request` /
+`proxy.call` traffic frames carry no task attribution and are dropped for
+named clients). `?task_id=` and `?session_id=` filter it further. Events
 have no `id:`. Use it for dashboards. On connect the feed first replays its
 backlog — the last ≤300 `http.request` frames (in-memory) and the newest ≤300
 task events read from disk (heartbeats skipped; survives serve restarts) —
@@ -457,7 +460,10 @@ turn behind.
 `SessionMeta`: `id`, `created_at`, `updated_at`, `turns`, `message_count`,
 `title` (first prompt, truncated), `model`, `workdir` (of the last turn),
 `context_tokens` (size after the last turn), `compactions`,
-`last_compaction_at`, `needs_compaction`, `last_task_id`, `task_ids` (recent).
+`last_compaction_at`, `needs_compaction`, `last_task_id`, `task_ids` (recent),
+`owner` (creating client; absent = the default key / pre-clients sessions).
+Named client keys see and touch only their own sessions here — a foreign
+session answers `403 session_not_owned` (GET/DELETE/messages/compact).
 
 **Compaction.** A session's whole history is sent with every request. Before a
 task starts, if the session's `context_tokens` ≥ `WRONGFORGE_COMPACT_AT`

@@ -108,10 +108,16 @@ function parseClientKeysMap(raw: Record<string, unknown>, source: "env" | "file"
  *   1. `AGENT_API_KEYS` env ("name=key,name=key"; keys are base64url, so the
  *      first "=" separates each pair)
  *   2. `<data dir>/api-keys.json` ({ "name": "wf_…" })
- * Invalid config throws at startup (fail closed, like a short AGENT_API_KEY).
+ * Invalid config throws at startup (fail closed, like a short AGENT_API_KEY) —
+ * including a key colliding with the default key or another client's: silently
+ * remapping one would quietly change who holds the admin view.
  */
 export function resolveClientKeys(defaultKey: string, env: NodeJS.ProcessEnv = process.env, keysFile?: string): ClientKeys {
   const byKey = new Map<string, string>([[defaultKey, DEFAULT_CLIENT]]);
+  const add = (name: string, key: string): void => {
+    if (byKey.has(key)) throw new Error(`client "${name}" key collides with an existing key (${byKey.get(key)})`);
+    byKey.set(key, name);
+  };
   let source: ClientKeys["source"] = "none";
   const rawEnv = env.AGENT_API_KEYS?.trim();
   if (rawEnv) {
@@ -121,12 +127,12 @@ export function resolveClientKeys(defaultKey: string, env: NodeJS.ProcessEnv = p
       if (eq <= 0) throw new Error(`AGENT_API_KEYS: "${pair.trim()}" is not name=key`);
       map[pair.slice(0, eq).trim()] = pair.slice(eq + 1).trim();
     }
-    for (const [k, v] of parseClientKeysMap(map, "env")) byKey.set(k, v);
+    for (const [k, v] of parseClientKeysMap(map, "env")) add(v, k);
     source = "env";
   } else if (keysFile) {
     try {
       const parsed = JSON.parse(fs.readFileSync(keysFile, "utf8")) as Record<string, unknown>;
-      for (const [k, v] of parseClientKeysMap(parsed, "file")) byKey.set(k, v);
+      for (const [k, v] of parseClientKeysMap(parsed, "file")) add(v, k);
       source = "file";
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;

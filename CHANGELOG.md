@@ -38,6 +38,18 @@ package.json and the git tags that drive the release workflow.
   `src/vite-env.d.ts` ambient-types reference made
   `tsc --noEmit -p webui/tsconfig.json` fail on the `styles.css` side-effect
   import (the vite build itself was never affected).
+- **Startup refuses ambiguous client-key configuration (F1905).** A key in
+  `AGENT_API_KEYS` / `api-keys.json` that collided with the default key (or
+  another client's key) silently remapped it — quietly moving the admin
+  view. Duplicate keys now fail closed with a named error.
+
+### Documentation
+- Drift audit of everything shipped since the v0.4.14 audit (F1901–F1904):
+  `GET /v1/events` now documents per-client scoping instead of "all tasks";
+  the Sessions section lists `SessionMeta.owner` and the
+  `403 session_not_owned` scoping; the server's route-map comment matches;
+  README's security notes state what a client key does and does not isolate
+  (task/session data yes — the shared subscription no).
 
 ## [0.4.16] — 2026-10-30
 
