@@ -4,6 +4,16 @@ Notable changes to WrongForge. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions match
 package.json and the git tags that drive the release workflow.
 
+## [Unreleased]
+
+### Added
+- **Upstream model-call retries are now visible while a task runs.** When the
+  API answers a retryable status (408/409/429/5xx), the task emits an
+  `agent.report` event (`phase: "retry"`) saying the status, the server's
+  `retry-after` if any, and how many client retries remain — the SDK's own
+  retries were silent, so a busy backend could leave a RUNNING task without a
+  single event for minutes (the non-queue half of #7's incident).
+
 ## [0.4.16] — 2026-10-30
 
 ### Added

@@ -11,6 +11,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import { ClaudeOAuth, CLAUDE_CODE_UA, parsePastedCode, setKeychainReaderForTest } from "../src/oauth.js";
 import { oauthFetch } from "../src/provider.js";
+import { runInContext } from "../src/context.js";
 
 // Temp dirs live under the OS temp dir and are removed on exit (pass or fail).
 const tmpDirs: string[] = [];
@@ -204,6 +205,56 @@ function main(): Promise<void> {
             beta.includes("interleaved-thinking-2025-05-14"),
           `beta headers merged: ${beta}`,
         );
+
+        // 3b) retryable upstream statuses surface as a task-visible
+        //     agent.report (issue #7: the SDK's silent retries left RUNNING
+        //     tasks without any event while the backend answered 503)
+        {
+          const reports: any[] = [];
+          let hits = 0;
+          const busy = http.createServer((_req, res) => {
+            hits++;
+            res.writeHead(503, { "content-type": "application/json", "retry-after": "3" });
+            res.end(JSON.stringify({ type: "error", error: { type: "overloaded_error", message: "model busy" } }));
+          });
+          busy.listen(0, "127.0.0.1");
+          await new Promise<void>((r) => busy.once("listening", () => r()));
+          const busyBase = `http://127.0.0.1:${(busy.address() as { port: number }).port}`;
+          const post = (extra: Record<string, string> = {}): RequestInit => ({
+            method: "POST",
+            headers: { "content-type": "application/json", ...extra },
+            body: JSON.stringify({ model: "claude-sonnet-5-5", messages: [] }),
+          });
+
+          await runInContext({ cwd: process.cwd(), env: {}, todos: [], report: (r) => reports.push(r) }, async () => {
+            const res = await f(`${busyBase}/v1/messages`, post());
+            check(res.status === 503, "the 503 response passes through untouched");
+          });
+          check(hits === 1, `exactly one upstream hit so far (${hits})`);
+          check(reports.length === 1 && reports[0].phase === "retry", `first attempt reports once (phase retry): ${JSON.stringify(reports)}`);
+          check(
+            /upstream 503/.test(reports[0].message) && /retries on its own \(2 left\)/.test(reports[0].message) && /wait 3s/.test(reports[0].message),
+            `first-attempt message has status, retries left and retry-after: ${reports[0].message}`,
+          );
+
+          reports.length = 0;
+          await runInContext({ cwd: process.cwd(), env: {}, todos: [], report: (r) => reports.push(r) }, async () => {
+            await f(`${busyBase}/v1/messages`, post({ "x-stainless-retry-count": "1" }));
+          });
+          check(reports.length === 1 && /\(1 left\)/.test(reports[0].message), `attempt 1 reports one retry left: ${reports[0].message}`);
+
+          reports.length = 0;
+          await runInContext({ cwd: process.cwd(), env: {}, todos: [], report: (r) => reports.push(r) }, async () => {
+            await f(`${busyBase}/v1/messages`, post({ "x-stainless-retry-count": "2" }));
+          });
+          check(reports.length === 1 && /retries exhausted/.test(reports[0].message), `last attempt reports exhaustion: ${reports[0].message}`);
+
+          reports.length = 0;
+          const outside = await f(`${busyBase}/v1/messages`, post());
+          check(outside.status === 503 && reports.length === 0, "outside a task context there is no report channel and no crash");
+
+          busy.close();
+        }
 
         // 4) import from a Claude Code credentials file (no network)
         const credFile = path.join(
@@ -442,7 +493,7 @@ function main(): Promise<void> {
         }
 
         server.close();
-        console.log("ALL TESTS PASSED ✓ (exchange, refresh, header injection, import, Keychain fallback, refresh-token recovery, stale-refresh race, keep-alive margin)");
+        console.log("ALL TESTS PASSED ✓ (exchange, refresh, header injection, retry visibility, import, Keychain fallback, refresh-token recovery, stale-refresh race, keep-alive margin)");
         resolve();
       } catch (e) {
         server.close();

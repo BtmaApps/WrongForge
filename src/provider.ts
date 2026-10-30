@@ -531,6 +531,31 @@ export function oauthFetch(oauth: ClaudeOAuth): typeof globalThis.fetch {
         res = await doFetch();
       }
     }
+    // Upstream retry visibility (issue #7 follow-up): for retryable statuses
+    // (408/409/429/5xx) the SDK retries silently, so a busy backend can leave
+    // a RUNNING task without a single event for minutes — the exact silence
+    // korlog's report showed beside the queue starvation. Say what is going on
+    // while it happens; the SDK's x-stainless-retry-count header (defaulted to
+    // "0" inside doFetch) tells us which attempt this response belongs to.
+    const url = typeof input === "string" ? input : input instanceof Request ? input.url : String(input);
+    if (
+      currentContext()?.report &&
+      url.includes("/v1/messages") &&
+      !url.includes("count_tokens") &&
+      (res.status === 408 || res.status === 409 || res.status === 429 || res.status >= 500)
+    ) {
+      const attempt = Number(new Headers(init?.headers).get("x-stainless-retry-count") ?? 0);
+      const retryAfter = Number(res.headers.get("retry-after"));
+      const wait = Number.isFinite(retryAfter) && retryAfter > 0 ? `; server asked to wait ${retryAfter}s` : "";
+      const left = Math.max(0, 2 - attempt); // maxRetries: 2 in createClaudeClient
+      currentContext()!.report!({
+        phase: "retry",
+        message:
+          left > 0
+            ? `upstream ${res.status}${wait} — the client retries on its own (${left} left), the task stays running`
+            : `upstream ${res.status}${wait} — client retries exhausted; this model call fails`,
+      });
+    }
     return res;
   };
 }
