@@ -17,6 +17,12 @@ package.json and the git tags that drive the release workflow.
   queue position and `waiting_for` reason, folded client-side from the
   `task.queued` / `task.queue_update` events.
 
+### Fixed
+- **The web UI's standalone typecheck passes again.** A missing
+  `src/vite-env.d.ts` ambient-types reference made
+  `tsc --noEmit -p webui/tsconfig.json` fail on the `styles.css` side-effect
+  import (the vite build itself was never affected).
+
 ## [0.4.16] — 2026-10-30
 
 ### Added
