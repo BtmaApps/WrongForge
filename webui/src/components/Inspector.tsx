@@ -142,6 +142,9 @@ function TaskPane({ taskId, onClose }: { taskId: string; onClose: () => void }) 
               <Chip label="effort" value={t.effort ?? "—"} tone="tone-cyan" />
               <Chip label="session" value={shortId(t.session_id, 14)} />
               <Chip label="steps" value={`${t.progress.steps}/${t.max_steps}`} />
+              {t.status === "queued" && t.progress.queue_wait && (
+                <Chip label="waiting" value={`#${t.progress.queue_wait.position + 1}${t.progress.queue_wait.waiting_for ? ` · ${t.progress.queue_wait.waiting_for}` : ""}`} tone="tone-amber" />
+              )}
               {t.result && <Chip label="duration" value={`${Math.round(t.result.duration_ms / 1000)}s`} />}
               {t.result && (
                 <Chip label="tokens" value={`↑${fmtTokens(t.result.usage.input_tokens)} ↓${fmtTokens(t.result.usage.output_tokens)}`} tone="tone-violet" />
@@ -187,8 +190,14 @@ function TaskPane({ taskId, onClose }: { taskId: string; onClose: () => void }) 
                   {s.tools.map((tool, i) => (
                     <ToolCard key={`${tool.call.seq}-${i}`} tool={tool} />
                   ))}
+                  {s.others.map((ev) => (
+                    <EventLine key={ev.seq} ev={ev} />
+                  ))}
                   {s.text && <pre className="step-text">{s.text}</pre>}
                 </div>
+              ))}
+              {folded.post.map((ev) => (
+                <EventLine key={ev.seq} ev={ev} />
               ))}
               {folded.steps.length === 0 && <div className="empty">no events for this task (yet)</div>}
             </div>
@@ -232,6 +241,12 @@ function foldSteps(events: TaskEvent[]): { pre: TaskEvent[]; steps: StepBlock[];
     }
     if (!cur) {
       pre.push(ev);
+      continue;
+    }
+    // after the last step finished, task-lifecycle events (completed/failed/
+    // cancelled/timed_out) belong after the steps, not inside the last one
+    if (cur.finished && ev.type.startsWith("task.")) {
+      post.push(ev);
       continue;
     }
     switch (ev.type) {

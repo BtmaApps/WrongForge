@@ -42,6 +42,12 @@ package.json and the git tags that drive the release workflow.
   `src/vite-env.d.ts` ambient-types reference made
   `tsc --noEmit -p webui/tsconfig.json` fail on the `styles.css` side-effect
   import (the vite build itself was never affected).
+- **The task detail view (Inspector) now shows the events it was silently
+  dropping (F2003).** `agent.report` lines — including the upstream retry
+  reports — and `agent.todos`/compaction events inside a step were folded
+  but never rendered; post-terminal task events now render after the last
+  step; and a queued task's header shows its queue position and wait reason
+  (the rail already did).
 - **Startup refuses ambiguous client-key configuration (F1905).** A key in
   `AGENT_API_KEYS` / `api-keys.json` that collided with the default key (or
   another client's key) silently remapped it — quietly moving the admin
