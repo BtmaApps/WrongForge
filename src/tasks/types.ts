@@ -114,6 +114,12 @@ export interface TaskRecord {
    * model call until the client timed out) — see manager.ts's blockReason.
    */
   priority?: "low";
+  /**
+   * Client (API key identity) that submitted this task. Absent = the single
+   * "default" key. Task list/event/cancel routes are scoped to it; sessions
+   * are owned by their creator, so two orchestrators never share history.
+   */
+  client?: string;
   /** Names only — values are never persisted. */
   env_keys: string[];
   system_append?: string;

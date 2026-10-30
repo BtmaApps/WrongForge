@@ -233,6 +233,19 @@ export class TaskManager {
     return this.o.store.list(filter);
   }
 
+  /** Tasks visible to `client` — "default" is the admin view and sees every client. */
+  listFor(client: string, filter: TaskFilter = {}): TaskRecord[] {
+    return this.list(client === "default" ? filter : { ...filter, client });
+  }
+
+  /** A task is visible to `client`? Foreign tasks answer 404, never 403, so
+   *  a client cannot even learn that someone else's task id exists. */
+  visibleTo(id: string, client: string): boolean {
+    const rec = this.o.store.get(id);
+    if (!rec) return false;
+    return client === "default" || (rec.client ?? "default") === client;
+  }
+
   events(id: string, after = 0, limit = 1000): TaskEvent[] {
     return this.o.store.readEvents(id, after, limit);
   }
@@ -273,7 +286,7 @@ export class TaskManager {
    * Validates and enqueues a task. Idempotent on `task_id`: re-sending the
    * same id returns the existing task (`deduplicated: true`).
    */
-  submit(req: SubmitRequest): { task: TaskRecord; deduplicated: boolean } {
+  submit(req: SubmitRequest, client = "default"): { task: TaskRecord; deduplicated: boolean } {
     if (this.closing) throw new SubmitError(503, "shutting_down", "server is shutting down");
     const o = this.o;
     const bad: (code: string, msg: string) => never = (code, msg) => {
@@ -296,6 +309,12 @@ export class TaskManager {
       const existing = o.store.get(req.task_id)!;
       const samePrompt = existing.prompt === req.prompt;
       const sameSession = req.session_id === undefined || existing.session_id === req.session_id;
+      if ((existing.client ?? "default") !== client) {
+        // never echo another client's task back, and never let a foreign
+        // client "deduplicate" into it (409, not 403 — same conflict family
+        // as a prompt mismatch, and it does not confirm anything else)
+        throw new SubmitError(409, "task_id_conflict", `task_id "${req.task_id}" belongs to another client`);
+      }
       if (!samePrompt || !sameSession) {
         throw new SubmitError(409, "task_id_conflict", `task_id "${req.task_id}" already exists with a different prompt/session`);
       }
@@ -397,14 +416,23 @@ export class TaskManager {
       mcpSelection = [...new Set(req.mcp)];
     }
 
-    // ---- session (create when missing)
+    // ---- session (create when missing). Sessions are owned by their
+    // creator's client: a second orchestrator pointing at the same
+    // session_id would silently merge conversation histories, so a foreign
+    // client is refused instead (sessions that predate client keys belong to
+    // the default key).
     let sessionId = req.session_id;
     let sessionCreated = false;
     if (!sessionId) {
       sessionId = `ses_${crypto.randomBytes(8).toString("hex")}`;
     }
-    if (!o.sessions.exists(sessionId)) {
-      o.sessions.create(sessionId);
+    if (o.sessions.exists(sessionId)) {
+      const owner = o.sessions.meta(sessionId)?.owner ?? "default";
+      if (owner !== client) {
+        throw new SubmitError(403, "session_not_owned", `session "${sessionId}" belongs to another client`);
+      }
+    } else {
+      o.sessions.create(sessionId, new Date(), client);
       sessionCreated = true;
     }
 
@@ -432,13 +460,14 @@ export class TaskManager {
       ...(gateway ? { gateway: describeGateway(gateway) } : {}),
       ...(mcpSelection ? { mcp: mcpSelection } : {}),
       ...(builtinTools ? { builtin_tools: builtinTools } : {}),
+      ...(client !== "default" ? { client } : {}),
       created_at: now,
       progress: { steps: 0, tool_calls: 0, last_event_seq: 0, last_activity_at: now },
     };
     o.store.put(rec);
     o.logger.info("task.submitted", {
       task_id: id, session_id: sessionId, session_created: sessionCreated, model, workdir, workdir_lock: workdirLock, cache, effort,
-      priority: rec.priority ?? "normal",
+      priority: rec.priority ?? "normal", client,
       max_steps: maxSteps, timeout_ms: timeoutMs, env_keys: rec.env_keys, has_callback: Boolean(rec.callback),
       prompt: rec.prompt, context: rec.context,
     });
@@ -582,7 +611,8 @@ export class TaskManager {
       const id = this.queue[i]!;
       const rec = this.o.store.get(id)!;
       const key = dirKey(rec.workdir);
-      if (holdSessions.has(rec.session_id) || holdDirs.has(key) || this.blockReason(rec) !== null) {
+      const fair = this.fairShareBlocks(rec);
+      if (holdSessions.has(rec.session_id) || holdDirs.has(key) || this.blockReason(rec, fair) !== null) {
         holdSessions.add(rec.session_id);
         if (rec.workdir_lock) holdDirs.add(key);
         i++;
@@ -606,11 +636,12 @@ export class TaskManager {
     // clients watching the event stream see queue progress without polling
     // (issue #7: a task can sit in the queue for minutes in total silence).
     this.queue.forEach((id, position) => {
-      const waiting = this.blockReason(this.o.store.get(id)!);
+      const rec = this.o.store.get(id)!;
+      const waiting = this.blockReason(rec, this.fairShareBlocks(rec));
       const prev = this.lastQueue.get(id);
       if (prev && prev.position === position && prev.waiting_for === waiting) return;
       this.lastQueue.set(id, { position, waiting_for: waiting });
-      this.emit(id, "task.queue_update", { position, waiting_for: waiting, priority: this.o.store.get(id)!.priority ?? "normal" });
+      this.emit(id, "task.queue_update", { position, waiting_for: waiting, priority: rec.priority ?? "normal" });
     });
   }
 
@@ -620,11 +651,16 @@ export class TaskManager {
    *    one slot every server keeps free for normal tasks (issue #7: helper
    *    tasks submitted as `priority: "low"` may fill at most
    *    max_concurrency - 1 slots, so the leader's next model call always has
-   *    a slot to take)
+   *    a slot to take) — or, for a client that already holds
+   *    max_concurrency - 1 slots, the last slot while ANOTHER client has a
+   *    startable task waiting (fair share across orchestrators; a
+   *    single-client install never sees this)
    *  - session:  another task of the same session is running
    *  - workdir:  another task runs in the same workdir and one of the two wants exclusivity
+   * @param fairShare precomputed fair-share verdict (pump passes it so the
+   *   queue is not rescanned; the O(queue) scan lives in fairShareBlocks)
    */
-  private blockReason(rec: TaskRecord): "capacity" | "session" | "workdir" | null {
+  private blockReason(rec: TaskRecord, fairShare = false): "capacity" | "session" | "workdir" | null {
     if (this.activeSessions.has(rec.session_id)) return "session";
     const key = dirKey(rec.workdir);
     for (const rid of this.running) {
@@ -633,7 +669,44 @@ export class TaskManager {
     }
     const limit = rec.priority === "low" ? this.o.maxConcurrency - 1 : this.o.maxConcurrency;
     if (this.running.size >= limit) return "capacity";
+    if (fairShare) return "capacity";
     return null;
+  }
+
+  /**
+   * True when taking one more slot for `rec` would fill the server with a
+   * single client's tasks while another client has a startable task queued —
+   * the multi-client version of the low-priority reservation. The last slot
+   * then stays free for the other client's head-of-queue work, so two
+   * orchestrators interleave instead of one hogging every slot. Never fires
+   * with max_concurrency 1 (it would invert FIFO into starvation) or for
+   * low-priority tasks (their reservation is stricter already).
+   */
+  private fairShareBlocks(rec: TaskRecord): boolean {
+    if (this.o.maxConcurrency < 2 || rec.priority === "low") return false;
+    if (this.running.size !== this.o.maxConcurrency - 1) return false;
+    const mine = rec.client ?? "default";
+    for (const rid of this.running) {
+      if ((this.o.store.get(rid)!.client ?? "default") !== mine) return false; // another client already holds a slot
+    }
+    // would this task complete the client's sweep of every slot? then hold it
+    // only while a DIFFERENT client has a startable task waiting
+    return this.queue.some((qid) => {
+      const other = this.o.store.get(qid)!;
+      if ((other.client ?? "default") === mine) return false;
+      return this.startableIgnoringCapacity(other);
+    });
+  }
+
+  /** Everything except the capacity check — would this queued task start if a slot were open? */
+  private startableIgnoringCapacity(rec: TaskRecord): boolean {
+    if (this.activeSessions.has(rec.session_id)) return false;
+    const key = dirKey(rec.workdir);
+    for (const rid of this.running) {
+      const r = this.o.store.get(rid)!;
+      if (dirKey(r.workdir) === key && (rec.workdir_lock || r.workdir_lock)) return false;
+    }
+    return !(rec.priority === "low" && this.running.size >= this.o.maxConcurrency - 1);
   }
 
   /**

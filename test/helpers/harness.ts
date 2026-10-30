@@ -325,6 +325,8 @@ export interface HarnessOptions {
   fake?: Fake;
   /** Serve this directory as the dashboard (tests the static + SPA routes). */
   webuiDir?: string;
+  /** Extra named client keys (key -> client name). Absent = single-key install. */
+  clientKeys?: Map<string, string>;
 }
 
 export async function startHarness(opts: HarnessOptions = {}): Promise<Harness> {
@@ -361,7 +363,7 @@ export async function startHarness(opts: HarnessOptions = {}): Promise<Harness> 
   });
   app.manager.recover();
 
-  const server = createAgentServer({ apiKey: key, oauth, app, promptDir, ...(opts.webuiDir ? { webuiDir: opts.webuiDir } : {}) });
+  const server = createAgentServer({ apiKey: key, ...(opts.clientKeys ? { clientKeys: opts.clientKeys } : {}), oauth, app, promptDir, ...(opts.webuiDir ? { webuiDir: opts.webuiDir } : {}) });
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
 

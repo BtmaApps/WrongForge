@@ -61,6 +61,12 @@ export interface SessionMeta {
   last_task_id?: string;
   /** Most recent task ids (capped). */
   task_ids: string[];
+  /**
+   * Client that created this session ("default" omitted for the single API
+   * key and for sessions that predate client keys). Another client submitting
+   * to the session is refused — sessions never mix across orchestrators.
+   */
+  owner?: string;
 }
 
 export interface LoadedSession {
@@ -87,7 +93,7 @@ export class SessionStore {
   }
 
   /** Creates an empty session. Throws if the id is invalid or already taken. */
-  create(id: string, now = new Date()): SessionMeta {
+  create(id: string, now = new Date(), owner?: string): SessionMeta {
     const d = this.sdir(id);
     if (fs.existsSync(path.join(d, "session.json"))) throw new Error(`session already exists: ${id}`);
     fs.mkdirSync(d, { recursive: true });
@@ -100,6 +106,7 @@ export class SessionStore {
       title: "",
       compactions: 0,
       task_ids: [],
+      ...(owner && owner !== "default" ? { owner } : {}),
     };
     this.writeMeta(meta);
     return meta;

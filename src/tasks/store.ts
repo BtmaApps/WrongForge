@@ -21,6 +21,8 @@ const DAY_MS = 86_400_000;
 export interface TaskFilter {
   status?: TaskStatus | TaskStatus[];
   session_id?: string;
+  /** Only tasks of this client (absent or "default" = no scoping — the default key sees every client). */
+  client?: string;
   /** Only tasks created before this ISO timestamp (pagination cursor). */
   before?: string;
   limit?: number;
@@ -86,6 +88,7 @@ export class TaskStore {
     let out = [...this.records.values()];
     if (statuses) out = out.filter((r) => statuses.has(r.status));
     if (filter.session_id) out = out.filter((r) => r.session_id === filter.session_id);
+    if (filter.client && filter.client !== "default") out = out.filter((r) => (r.client ?? "default") === filter.client);
     if (filter.before) out = out.filter((r) => r.created_at < filter.before!);
     out.sort((a, b) => b.created_at.localeCompare(a.created_at));
     return out.slice(0, filter.limit ?? 100);

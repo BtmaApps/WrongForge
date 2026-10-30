@@ -7,6 +7,22 @@ package.json and the git tags that drive the release workflow.
 ## [Unreleased]
 
 ### Added
+- **Named client keys: several orchestrators can share one WrongForge server
+  without their work mixing.** `AGENT_API_KEYS="stackA=wf_…,stackB=wf_…"`
+  (or `<data dir>/api-keys.json`) gives each WrongStack instance its own
+  credential. Tasks are stamped with the authenticated client
+  (`task.client`, server-assigned), **sessions are owned by their creator** —
+  a client submitting to another client's session is refused
+  (`403 session_not_owned`), so conversation histories can never merge —
+  and `GET /v1/tasks`, the `/v1/events` global feed and the sessions routes
+  are scoped to the caller (foreign tasks answer `404`, no existence leak).
+  The single key stays valid as the `default` admin view (sees every
+  client), so single-orchestrator setups are untouched.
+- **The task queue is fair across clients:** a client that already holds
+  `max_concurrency - 1` slots cannot take the last one while another client
+  has a startable task queued — two orchestrators interleave instead of one
+  hogging every slot (never applies with `max_concurrency` 1; the
+  `priority: "low"` reservation from 0.4.16 composes on top).
 - **Upstream model-call retries are now visible while a task runs.** When the
   API answers a retryable status (408/409/429/5xx), the task emits an
   `agent.report` event (`phase: "retry"`) saying the status, the server's

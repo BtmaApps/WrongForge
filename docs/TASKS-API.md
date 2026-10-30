@@ -35,6 +35,31 @@ is never logged. The key is resolved at startup:
 3. else a strong key (`wf_…`) is generated, saved there (mode 0600) and shown in
    the startup banner.
 
+### Multiple clients (several orchestrators, one server)
+
+When more than one orchestrator (e.g. several WrongStack instances) shares one
+WrongForge, give each its own **client key** so their work never mixes:
+
+- `AGENT_API_KEYS="stackA=wf_…,stackB=wf_…"` (env), or
+  `<data dir>/api-keys.json` (`{ "stackA": "wf_…" }`). The single key above
+  stays valid and is the client **`default`**.
+- Every task is stamped with the authenticated client (`task.client`); the
+  field is server-assigned — a body value is ignored.
+- **Sessions are owned by their creator.** A client submitting to another
+  client's session gets `403 session_not_owned` — histories can never merge
+  across orchestrators. Sessions that predate client keys belong to `default`.
+- `GET /v1/tasks`, `GET /v1/events` (the global feed), and the sessions routes
+  are scoped to the caller; a foreign task answers `404 task_not_found` (no
+  existence leak) and a foreign session `403 session_not_owned`.
+- `default` is the admin view: it sees every client (the dashboard connects
+  with it). Resubmitting another client's `task_id` conflicts with
+  `409 task_id_conflict` without echoing the task.
+- Client names must match `[A-Za-z0-9][A-Za-z0-9._-]{0,31}` (never
+  `default`), keys ≥ 16 chars; invalid configuration refuses to start.
+- The queue is fair across clients: a client that already holds
+  `max_concurrency - 1` slots cannot take the last one while another client
+  has a startable task queued (never applies with `max_concurrency` 1).
+
 The server also serves a built dashboard (React + Radix UI + React Flow) at
 `/` when `webui/dist` exists (`npm run webui:build`): live firehose, task
 detail with per-step request/response traffic, sessions, and a graph view of
@@ -119,6 +144,7 @@ Persisted as `tasks/<id>/task.json`.
   "workdir_lock": false,
   "cache": "1h",
   "effort": "high",                    // low | medium | high | off
+  "client": "stackA",                  // authenticated client key; absent = the default key
   "env_keys": ["API_URL"],             // names only
   "system_append": "…",                // if given
   "context": { },                      // if given, untouched
@@ -216,6 +242,11 @@ Submit-time errors (HTTP `400` unless noted), `error.code` in the response body:
   `max_concurrency - 1` tasks run. Submit orchestrator helper/fleet tasks as
   `"low"` so a burst of them can never occupy every slot and starve the
   interactive task that spawned them.
+- The last slot is also shared **across clients**: a client that already holds
+  `max_concurrency - 1` slots cannot take the final one while another client
+  has a startable task queued, so two orchestrators interleave instead of one
+  hogging every slot (never applies with `max_concurrency` 1, and never for
+  `priority: "low"` tasks, whose reservation is stricter).
 - A queued task's wait is observable without polling: every time its position
   or block reason changes it emits `task.queue_update`, and
   `GET /v1/tasks/:id` reports `queue_position` and `waiting_for` alongside the
@@ -470,7 +501,7 @@ Errors have the shape `{ "error": { "code": "…", "message": "…" } }`.
 |---|---|
 | 400 | `invalid_json`, `invalid_request`, `workdir_required`, `invalid_workdir`, `invalid_gateway`, `unknown_mcp_server`, `callbacks_disabled`, `invalid_mcp_config` |
 | 401 | `unauthorized` (`WWW-Authenticate: Bearer`) |
-| 403 | `workdir_not_allowed` |
+| 403 | `workdir_not_allowed`, `session_not_owned` (a client submitting to another client's session) |
 | 404 | `not_found`, `task_not_found`, `session_not_found`, `no_such_session`, `mcp_server_not_found`, `mcp_tool_not_found`, `unknown_server` (MCP) |
 | 409 | `task_id_conflict`, `session_exists`, `session_busy`, `server_disabled` (MCP) |
 | 413 | `body_too_large` |

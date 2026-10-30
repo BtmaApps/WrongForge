@@ -32,7 +32,7 @@ import { agentTools } from "./tools/index.js";
 import { DEFAULT_MODEL, KNOWN_MODELS } from "./agent.js";
 import { effortSupport } from "./effort.js";
 import { APP_NAME, VERSION, dataDir } from "./paths.js";
-import { resolveApiKey } from "./apikey.js";
+import { clientKeysFile, resolveApiKey, resolveClientKeys } from "./apikey.js";
 import { createProxyHandler, proxyEnabled, proxyMaxBody, type ProxyCallEvent } from "./proxy.js";
 import { printBanner } from "./banner.js";
 import { loadPromptFiles } from "./prompt.js";
@@ -75,6 +75,8 @@ class HttpError extends Error {
 
 export interface ServerOptions {
   apiKey: string;
+  /** Extra named client keys (key -> client name, "default" included). Absent = single-key install. */
+  clientKeys?: Map<string, string>;
   oauth: ClaudeOAuth;
   app: App;
   /** Override the tool-guide directory shown in /v1/info (tests). */
@@ -130,8 +132,11 @@ Build it once:</p>
 export function createAgentServer(opts: ServerOptions): http.Server {
   const { app, oauth } = opts;
   const manager = app.manager;
-  const keyBuf = Buffer.from(opts.apiKey);
   const webuiDir = opts.webuiDir ?? DEFAULT_WEBUI_DIR;
+  // key -> client name; the default key ALWAYS maps to "default" (the admin
+  // view), merged in no matter what the caller passed. Missing map = single-key install.
+  const clientKeys = new Map<string, string>(opts.clientKeys ? [[opts.apiKey, "default"], ...opts.clientKeys] : [[opts.apiKey, "default"]]);
+  const keyBuffers = [...clientKeys.keys()].map((k) => Buffer.from(k));
 
   const webuiBuilt = (): boolean => {
     try {
@@ -244,13 +249,20 @@ export function createAgentServer(opts: ServerOptions): http.Server {
    * dashboard (and only it; the key is a localhost server key) workable.
    * Never logged: http.request logs the path without the query string.
    */
-  const authorized = (req: http.IncomingMessage, url: URL): boolean => {
+  /**
+   * Which client (named key) is calling, or undefined for a bad key. The
+   * "default" client is the admin view: it sees every other client's tasks.
+   */
+  const authClient = (req: http.IncomingMessage, url: URL): string | undefined => {
     const m = /^Bearer (.+)$/i.exec(req.headers.authorization ?? "");
     const h = req.headers["x-api-key"];
     const candidate = m?.[1] ?? (typeof h === "string" ? h : undefined) ?? url.searchParams.get("key") ?? "";
-    if (!candidate) return false;
+    if (!candidate) return undefined;
     const got = Buffer.from(candidate);
-    return got.length === keyBuf.length && crypto.timingSafeEqual(got, keyBuf);
+    for (const kb of keyBuffers) {
+      if (got.length === kb.length && crypto.timingSafeEqual(got, kb)) return clientKeys.get(candidate.toString());
+    }
+    return undefined;
   };
 
   const json = (res: http.ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}): void => {
@@ -426,7 +438,7 @@ export function createAgentServer(opts: ServerOptions): http.Server {
 
   const taskNotFound = (id: string): HttpError => new HttpError(404, "task_not_found", `no task "${id}"`);
 
-  async function submitTask(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  async function submitTask(req: http.IncomingMessage, res: http.ServerResponse, client: string): Promise<void> {
     const body = await readJson(req);
     const { wait, stream, cancel_on_disconnect, ...rest } = body as Record<string, unknown> & {
       wait?: boolean;
@@ -434,7 +446,8 @@ export function createAgentServer(opts: ServerOptions): http.Server {
       cancel_on_disconnect?: boolean;
     };
     if (!oauth.signedIn) throw new HttpError(503, "not_signed_in", "WrongForge is not signed in (run `npm run import` or `npm run login`)");
-    const { task, deduplicated } = manager.submit(rest as unknown as SubmitRequest);
+    // the client comes from the API key, never from the body
+    const { task, deduplicated } = manager.submit(rest as unknown as SubmitRequest, client);
     const location = { Location: `/v1/tasks/${task.id}` };
 
     if (stream === true) {
@@ -479,9 +492,16 @@ export function createAgentServer(opts: ServerOptions): http.Server {
     });
   }
 
-  function globalEvents(req: http.IncomingMessage, res: http.ServerResponse, url: URL): void {
+  function globalEvents(req: http.IncomingMessage, res: http.ServerResponse, url: URL, client: string): void {
     const taskFilter = url.searchParams.get("task_id");
     const sessionFilter = url.searchParams.get("session_id");
+    // Named clients only ever see their own tasks: every event is attributed
+    // through its task record, and the unfiltered traffic taps (which carry
+    // no task_id and cannot be attributed) are dropped for them wholesale —
+    // the same rule filtered feeds already follow (F201).
+    const scoped = client !== "default";
+    const ownsTask = (taskId: string | undefined): boolean =>
+      taskId !== undefined && app.taskStore.get(taskId)?.client === client;
     // One predicate for the WHOLE feed — the replayed backlog and the live tail.
     // It used to guard only the live subscription, so a filtered subscriber was
     // handed every other session's replayed backlog on connect (F201).
@@ -490,8 +510,9 @@ export function createAgentServer(opts: ServerOptions): http.Server {
     // active — that is what "the filter filters the feed" means. Unfiltered
     // dashboards (the dashboard itself uses /v1/events with no filter) keep the
     // traffic view.
-    const filtered = taskFilter !== null || sessionFilter !== null;
+    const filtered = scoped || taskFilter !== null || sessionFilter !== null;
     const keep = (ev: { task_id?: string; session_id?: string }): boolean => {
+      if (scoped && !ownsTask(ev.task_id)) return false;
       if (taskFilter && ev.task_id !== taskFilter) return false;
       if (sessionFilter && ev.session_id !== sessionFilter) return false;
       return true;
@@ -591,18 +612,25 @@ export function createAgentServer(opts: ServerOptions): http.Server {
     };
   }
 
-  async function sessionRoutes(req: http.IncomingMessage, res: http.ServerResponse, url: URL, parts: string[]): Promise<boolean> {
+  async function sessionRoutes(req: http.IncomingMessage, res: http.ServerResponse, url: URL, parts: string[], client: string): Promise<boolean> {
     const method = req.method ?? "GET";
     const sessions = app.sessions;
+    // named clients see only their own sessions (legacy sessions, which have
+    // no owner on disk, belong to the default key)
+    const scopedList = (): unknown[] => (client === "default" ? sessions.list() : sessions.list().filter((s) => (s.owner ?? "default") === client));
+    const sessionVisible = (id: string): boolean => {
+      const meta = sessions.meta(id);
+      return !!meta && (client === "default" || (meta.owner ?? "default") === client);
+    };
 
     if (parts.length === 2) {
-      if (method === "GET") return json(res, 200, { sessions: sessions.list() }), true;
+      if (method === "GET") return json(res, 200, { sessions: scopedList() }), true;
       if (method === "POST") {
         const body = await readJson(req);
         const id = body.id === undefined ? `ses_${crypto.randomBytes(8).toString("hex")}` : body.id;
         if (!SessionStore.isValidId(id)) throw new HttpError(400, "invalid_request", "`id` must match [A-Za-z0-9][A-Za-z0-9._-]{0,127}");
         if (sessions.exists(id)) throw new HttpError(409, "session_exists", `session "${id}" already exists`);
-        return json(res, 201, { session: sessions.create(id) }, { Location: `/v1/sessions/${id}` }), true;
+        return json(res, 201, { session: sessions.create(id, new Date(), client) }, { Location: `/v1/sessions/${id}` }), true;
       }
       return false;
     }
@@ -610,15 +638,21 @@ export function createAgentServer(opts: ServerOptions): http.Server {
     const id = seg(parts[2]!);
     if (!SessionStore.isValidId(id)) throw new HttpError(400, "invalid_request", "invalid session id");
     const notFound = new HttpError(404, "session_not_found", `no session "${id}"`);
+    const forbidden = new HttpError(403, "session_not_owned", `session "${id}" belongs to another client`);
+    const assertVisible = (): void => {
+      const meta = sessions.meta(id);
+      if (!meta) throw notFound;
+      if (client !== "default" && (meta.owner ?? "default") !== client) throw forbidden;
+    };
 
     if (parts.length === 3) {
       if (method === "GET") {
-        const meta = sessions.meta(id);
-        if (!meta) throw notFound;
+        assertVisible();
+        const meta = sessions.meta(id)!;
         return json(res, 200, { session: meta, in_use: manager.sessionInUse(id) }), true;
       }
       if (method === "DELETE") {
-        if (!sessions.exists(id)) throw notFound;
+        assertVisible();
         if (manager.sessionInUse(id)) throw new HttpError(409, "session_busy", "a task of this session is queued or running");
         sessions.delete(id);
         return json(res, 200, { deleted: id }), true;
@@ -627,12 +661,14 @@ export function createAgentServer(opts: ServerOptions): http.Server {
     }
 
     if (parts.length === 4 && parts[3] === "messages" && method === "GET") {
+      assertVisible();
       const page = sessions.page(id, intParam(url, "offset", 0, 0, Number.MAX_SAFE_INTEGER), intParam(url, "limit", 100, 1, 1000));
       if (!page) throw notFound;
       return json(res, 200, { session_id: id, ...page }), true;
     }
 
     if (parts.length === 4 && parts[3] === "compact" && method === "POST") {
+      assertVisible();
       const body = await readJson(req);
       try {
         return json(res, 200, await manager.compactSession(id, typeof body.model === "string" ? body.model : undefined)), true;
@@ -717,7 +753,8 @@ export function createAgentServer(opts: ServerOptions): http.Server {
         return;
       }
     }
-    if (!authorized(req, url)) {
+    const client = authClient(req, url);
+    if (client === undefined) {
       res.setHeader("WWW-Authenticate", "Bearer");
       throw new HttpError(401, "unauthorized", "missing or wrong API key (send `Authorization: Bearer <key>`)");
     }
@@ -738,13 +775,14 @@ export function createAgentServer(opts: ServerOptions): http.Server {
 
     if (area === "tasks") {
       if (parts.length === 2) {
-        if (method === "POST") return submitTask(req, res);
+        if (method === "POST") return submitTask(req, res, client);
         if (method === "GET") {
           const raw = url.searchParams.get("status");
           const statuses = raw ? (raw.split(",").map((s) => s.trim()) as TaskStatus[]) : undefined;
           if (statuses?.some((s) => !ALL_STATUSES.includes(s))) throw new HttpError(400, "invalid_request", `\`status\` must be a comma list of ${ALL_STATUSES.join(", ")}`);
           const limit = intParam(url, "limit", 50, 1, 500);
-          const tasks = manager.list({
+          // named clients see only their own tasks; the default key sees all
+          const tasks = manager.listFor(client, {
             status: statuses,
             session_id: url.searchParams.get("session_id") ?? undefined,
             before: url.searchParams.get("before") ?? undefined,
@@ -754,6 +792,9 @@ export function createAgentServer(opts: ServerOptions): http.Server {
         }
       } else {
         const id = seg(parts[2]!);
+        // a foreign task does not exist as far as this client is concerned
+        // (404, not 403 — no existence leak across orchestrators)
+        if (!manager.visibleTo(id, client)) throw taskNotFound(id);
         if (parts.length === 3 && method === "GET") {
           const task = manager.get(id);
           if (!task) throw taskNotFound(id);
@@ -772,13 +813,13 @@ export function createAgentServer(opts: ServerOptions): http.Server {
         }
       }
     } else if (area === "events" && parts.length === 2 && method === "GET") {
-      return globalEvents(req, res, url);
+      return globalEvents(req, res, url, client);
     } else if (area === "messages" || area === "models") {
       // Anthropic-compatible proxy surface (src/proxy.ts) — same key auth as
       // everything else; returns false for shapes it does not serve
       if (proxyEnabled() && (await proxy(req, res, method, url.pathname, url.search))) return;
     } else if (area === "sessions") {
-      if (await sessionRoutes(req, res, url, parts)) return;
+      if (await sessionRoutes(req, res, url, parts, client)) return;
     } else if (area === "mcp") {
       if (await mcpRoutes(req, res, url, parts)) return;
     } else if (area === "info" && parts.length === 2 && method === "GET") {
@@ -854,6 +895,7 @@ export interface EnvServer {
 export async function startEnvServer(): Promise<EnvServer> {
   cleanupOldBinary(); // remove a binary renamed aside by the previous update
   const resolved = resolveApiKey(); // env -> saved file -> generate + save
+  const clients = resolveClientKeys(resolved.key, process.env, clientKeysFile()); // + named client keys (fail closed on bad config)
   const oauth = new ClaudeOAuth(process.env.CLAUDE_TOKEN_STORE || undefined);
   const host = process.env.HOST || "127.0.0.1";
   const port = Number(process.env.PORT || 8787);
@@ -863,7 +905,7 @@ export async function startEnvServer(): Promise<EnvServer> {
     logger: app.logger, taskStore: app.taskStore, sessions: app.sessions, retention: app.retention,
     busySessions: () => app.manager.busySessions(),
   });
-  const server = createAgentServer({ apiKey: resolved.key, oauth, app });
+  const server = createAgentServer({ apiKey: resolved.key, clientKeys: clients.byKey, oauth, app });
 
   server.on("error", (e: NodeJS.ErrnoException) => {
     console.error(

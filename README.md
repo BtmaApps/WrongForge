@@ -625,6 +625,7 @@ Environment variables (all optional unless noted):
 | `ANTHROPIC_TOKEN_URL`, `CLAUDE_OAUTH_*`, `ANTHROPIC_AUTHORIZE_URL` | OAuth endpoints / client registration overrides (`CLIENT_ID`, `AUTHORIZE_URL`, `TOKEN_URL`, `REDIRECT_URI`, `SCOPE`); `CLAUDE_OAUTH_CONFIG` = config file path |
 | `CLAUDE_CREDENTIALS_FILE` | Path of the Claude Code credentials file `import` reads (default `~/.claude/.credentials.json`) |
 | `AGENT_API_KEY` | Server Bearer key (≥ 16 chars). Unset → saved/generated key |
+| `AGENT_API_KEYS` | Extra named client keys `name=key,…` (or `<data dir>/api-keys.json`) — one per orchestrator; each client sees only its own tasks/sessions, the single key stays the admin `default` view. See TASKS-API.md → "Multiple clients" |
 | `PORT` / `HOST` | Server listen port (8787) / address (127.0.0.1) |
 | `WRONGFORGE_PROXY` | Anthropic-compatible `/v1/messages` + `/v1/models` proxy surface (`0` disables; on by default) |
 | `WRONGFORGE_PROXY_MAX_BODY` | Proxy request body cap in bytes (32 MB) |
