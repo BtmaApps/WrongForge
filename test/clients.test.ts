@@ -171,6 +171,11 @@ async function main(): Promise<void> {
     const bDoc = (await h.api("GET", `/v1/tasks/${b1.id}`)).body.task;
     assert(bDoc.started_at, "B's task got the fair slot and ran");
     assert(Date.parse(bDoc.started_at) < Date.parse((await h.api("GET", `/v1/tasks/${a3.id}`)).body.task.started_at ?? "9999"), "B started before A's third task");
+    // a3's task.queued already told the truth about the fair block (no
+    // contradicting queue_update right after)
+    const queued = (await h.events(a3.id)).find((e: any) => e.type === "task.queued");
+    const contradicting = (await h.events(a3.id)).some((e: any) => e.type === "task.queue_update" && e.data.waiting_for === null);
+    assert(queued.data.waiting_for === "capacity" && !contradicting, `queued event is fair-aware, no null correction follows (queued=${JSON.stringify(queued.data)})`);
 
     const [ra1, ra2, ra3] = [await h.waitTask(a1.id), await h.waitTask(a2.id), await h.waitTask(a3.id)];
     assert([ra1, ra2, ra3].every((t) => t.status === "completed"), "every task completed once slots freed");

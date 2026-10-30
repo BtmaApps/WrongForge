@@ -477,16 +477,21 @@ export class TaskManager {
     this.live.set(id, { env, gateway, abort: new AbortController(), textBuf: "", done, resolveDone });
     this.seqs.set(id, 0);
     this.queue.push(id);
+    // the task is in the queue now, so blockReason sees the full picture —
+    // including fair-share, so a task queued into a fair-blocked slot
+    // announces "capacity" right away instead of a null that pump would
+    // immediately contradict with a queue_update
+    const queuedWaiting = this.blockReason(rec, this.fairShareBlocks(rec));
     this.emit(id, "task.queued", {
       position: this.queue.length - 1,
       // why it cannot start right now: capacity | session | workdir (null = it starts immediately)
-      waiting_for: this.blockReason(rec),
+      waiting_for: queuedWaiting,
       session_id: sessionId,
       session_created: sessionCreated,
       workdir,
     });
     // task.queued already announced this state — don't repeat it on the next pump
-    this.lastQueue.set(id, { position: this.queue.length - 1, waiting_for: this.blockReason(rec) });
+    this.lastQueue.set(id, { position: this.queue.length - 1, waiting_for: queuedWaiting });
     this.pump();
     return { task: rec, deduplicated: false };
   }

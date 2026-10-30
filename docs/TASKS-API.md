@@ -59,6 +59,9 @@ WrongForge, give each its own **client key** so their work never mixes:
 - The queue is fair across clients: a client that already holds
   `max_concurrency - 1` slots cannot take the last one while another client
   has a startable task queued (never applies with `max_concurrency` 1).
+- The Anthropic-compatible proxy surface (`/v1/messages`, `/v1/models`) is
+  **shared**: every client key may call it, and proxy calls are not
+  attributed to clients (they are not tasks).
 
 The server also serves a built dashboard (React + Radix UI + React Flow) at
 `/` when `webui/dist` exists (`npm run webui:build`): live firehose, task
